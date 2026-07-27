@@ -467,8 +467,17 @@ app.get('/api/history/:playerName', async (req, res) => {
 });
 
 // ─── ヘルスチェック ────────────────────────────────────────────────────────────
-app.get('/api/health', (_, res) => {
-  res.json({ status: 'ok', model: MODEL, db: !!supabase });
+app.get('/api/health', async (_, res) => {
+  let dbStatus = 'not_configured';
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.from('feedbacks').select('id').limit(1);
+      dbStatus = error ? `error: ${error.message}` : 'ok';
+    } catch (e) {
+      dbStatus = `exception: ${e.message}`;
+    }
+  }
+  res.json({ status: 'ok', model: MODEL, node: process.version, db: !!supabase, dbStatus });
 });
 
 // ─── 起動 ─────────────────────────────────────────────────────────────────────
