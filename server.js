@@ -8,6 +8,7 @@ const os = require('os');
 const { execSync } = require('child_process');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { GoogleAIFileManager } = require('@google/generative-ai/server');
+const { createClient } = require('@supabase/supabase-js');
 
 // ─── 起動チェック ────────────────────────────────────────────────────────────
 if (!process.env.GEMINI_API_KEY) {
@@ -31,6 +32,16 @@ const upload = multer({
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const fileManager = new GoogleAIFileManager(process.env.GEMINI_API_KEY);
+
+const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY)
+  : null;
+
+if (supabase) {
+  console.log('✅ Supabase接続: 有効');
+} else {
+  console.warn('⚠️  Supabase未設定: DB保存はスキップされます');
+}
 
 const BASE_TEMPLATE = fs.readFileSync(
   path.join(__dirname, 'templates', 'base.html'),
@@ -283,6 +294,20 @@ ${text}`;
       deployError = err.message;
     }
 
+    if (supabase) {
+      const { error: dbError } = await supabase.from('feedbacks').insert({
+        player_name: playerName || '不明',
+        match_date: date || null,
+        match_info: null,
+        transcription_text: text,
+        player_notes: playerNotes || null,
+        html_content: finalHTML,
+        surge_url: url,
+      });
+      if (dbError) console.error('[generate-text] DB保存エラー:', dbError.message);
+      else console.log('[generate-text] DB保存完了');
+    }
+
     res.json({ success: true, url, localFile: filePath, error: deployError });
   } catch (err) {
     console.error('[generate-text]', err);
@@ -373,6 +398,20 @@ ${transcription}`;
       deployError = err.message;
     }
 
+    if (supabase) {
+      const { error: dbError } = await supabase.from('feedbacks').insert({
+        player_name: playerName || '不明',
+        match_date: date || null,
+        match_info: null,
+        transcription_text: transcription,
+        player_notes: playerNotes || null,
+        html_content: finalHTML,
+        surge_url: url,
+      });
+      if (dbError) console.error('[generate-audio] DB保存エラー:', dbError.message);
+      else console.log('[generate-audio] DB保存完了');
+    }
+
     res.json({ success: true, url, localFile: filePath, error: deployError });
   } catch (err) {
     console.error('[generate-audio]', err);
@@ -387,9 +426,31 @@ ${transcription}`;
   }
 });
 
+// ─── 履歴取得 ─────────────────────────────────────────────────────────────────
+app.get('/api/history', async (req, res) => {
+  if (!supabase) return res.json({ feedbacks: [] });
+  const { data, error } = await supabase
+    .from('feedbacks')
+    .select('id, player_name, match_date, surge_url, created_at')
+    .order('created_at', { ascending: false });
+  if (error) console.error('[history]', error.message);
+  res.json({ feedbacks: data || [] });
+});
+
+app.get('/api/history/:playerName', async (req, res) => {
+  if (!supabase) return res.json({ feedbacks: [] });
+  const { data, error } = await supabase
+    .from('feedbacks')
+    .select('id, player_name, match_date, surge_url, created_at, transcription_text')
+    .eq('player_name', req.params.playerName)
+    .order('created_at', { ascending: false });
+  if (error) console.error('[history/:playerName]', error.message);
+  res.json({ feedbacks: data || [] });
+});
+
 // ─── ヘルスチェック ────────────────────────────────────────────────────────────
 app.get('/api/health', (_, res) => {
-  res.json({ status: 'ok', model: MODEL });
+  res.json({ status: 'ok', model: MODEL, db: !!supabase });
 });
 
 // ─── 起動 ─────────────────────────────────────────────────────────────────────
