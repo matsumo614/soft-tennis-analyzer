@@ -84,7 +84,7 @@ const SYSTEM_PROMPT = `あなたはソフトテニスのコーチングフィー
     ソフトテニス コーチング
   </div>
   <h1 class="text-3xl md:text-5xl font-black text-slate-900 tracking-tight mb-4">
-    [選手名]への<br><span class="text-ads-accent-light">フィードバック</span>
+    [選手名]選手への<br><span class="text-ads-accent-light">フィードバック</span>
   </h1>
   <p class="text-sm text-ads-dim mb-4">[日付] ／ [試合情報があれば]</p>
   <div class="bg-ads-surface border border-ads-border rounded-2xl p-5 max-w-xl mx-auto text-left">
@@ -275,7 +275,8 @@ ${text}`;
     const htmlContent = cleanGeneratedHTML(result.response.text());
 
     const slug = generateSlug(playerName, date);
-    const title = `${playerName || '選手'}へのフィードバック`;
+    const displayName = playerName ? `${playerName}選手` : '選手';
+    const title = `${displayName}へのフィードバック`;
     const description = `ソフトテニス試合フィードバック（${date || ''}）`;
 
     const finalHTML = buildHTML(htmlContent, title, description);
@@ -383,7 +384,8 @@ ${transcription}`;
     const htmlContent = cleanGeneratedHTML(result.response.text());
 
     const slug = generateSlug(playerName, date);
-    const title = `${playerName || '選手'}へのフィードバック`;
+    const displayName = playerName ? `${playerName}選手` : '選手';
+    const title = `${displayName}へのフィードバック`;
     const description = `ソフトテニス試合フィードバック（${date || ''}）`;
 
     const finalHTML = buildHTML(htmlContent, title, description);
