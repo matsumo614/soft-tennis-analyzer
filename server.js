@@ -469,15 +469,35 @@ app.get('/api/history/:playerName', async (req, res) => {
 // ─── ヘルスチェック ────────────────────────────────────────────────────────────
 app.get('/api/health', async (_, res) => {
   let dbStatus = 'not_configured';
-  if (supabase) {
+  let rawFetchStatus = 'not_tested';
+
+  if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
+    // supabase-jsクライアント経由のテスト
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.from('feedbacks').select('id').limit(1);
+        dbStatus = error ? `supabase_error: ${error.message}` : 'ok';
+      } catch (e) {
+        dbStatus = `exception: ${e.message}`;
+      }
+    }
+
+    // 生のfetchでSupabase REST APIに直接アクセス
     try {
-      const { data, error } = await supabase.from('feedbacks').select('id').limit(1);
-      dbStatus = error ? `error: ${error.message}` : 'ok';
+      const url = `${process.env.SUPABASE_URL}/rest/v1/feedbacks?select=id&limit=1`;
+      const r = await fetch(url, {
+        headers: {
+          apikey: process.env.SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${process.env.SUPABASE_ANON_KEY}`,
+        },
+      });
+      rawFetchStatus = `${r.status} ${r.statusText}`;
     } catch (e) {
-      dbStatus = `exception: ${e.message}`;
+      rawFetchStatus = `fetch_error: ${e.message}`;
     }
   }
-  res.json({ status: 'ok', model: MODEL, node: process.version, db: !!supabase, dbStatus });
+
+  res.json({ status: 'ok', model: MODEL, node: process.version, db: !!supabase, dbStatus, rawFetchStatus });
 });
 
 // ─── 起動 ─────────────────────────────────────────────────────────────────────
