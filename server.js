@@ -295,17 +295,21 @@ ${text}`;
     }
 
     if (supabase) {
-      const { error: dbError } = await supabase.from('feedbacks').insert({
-        player_name: playerName || '不明',
-        match_date: date || null,
-        match_info: null,
-        transcription_text: text,
-        player_notes: playerNotes || null,
-        html_content: finalHTML,
-        surge_url: url,
-      });
-      if (dbError) console.error('[generate-text] DB保存エラー:', dbError.message);
-      else console.log('[generate-text] DB保存完了');
+      try {
+        const { error: dbError } = await supabase.from('feedbacks').insert({
+          player_name: playerName || '不明',
+          match_date: date || null,
+          match_info: null,
+          transcription_text: text,
+          player_notes: playerNotes || null,
+          html_content: finalHTML,
+          surge_url: url,
+        });
+        if (dbError) console.error('[generate-text] DB保存エラー:', dbError.message);
+        else console.log('[generate-text] DB保存完了');
+      } catch (dbErr) {
+        console.error('[generate-text] DB保存例外:', dbErr.message);
+      }
     }
 
     res.json({ success: true, url, localFile: filePath, error: deployError });
@@ -399,17 +403,21 @@ ${transcription}`;
     }
 
     if (supabase) {
-      const { error: dbError } = await supabase.from('feedbacks').insert({
-        player_name: playerName || '不明',
-        match_date: date || null,
-        match_info: null,
-        transcription_text: transcription,
-        player_notes: playerNotes || null,
-        html_content: finalHTML,
-        surge_url: url,
-      });
-      if (dbError) console.error('[generate-audio] DB保存エラー:', dbError.message);
-      else console.log('[generate-audio] DB保存完了');
+      try {
+        const { error: dbError } = await supabase.from('feedbacks').insert({
+          player_name: playerName || '不明',
+          match_date: date || null,
+          match_info: null,
+          transcription_text: transcription,
+          player_notes: playerNotes || null,
+          html_content: finalHTML,
+          surge_url: url,
+        });
+        if (dbError) console.error('[generate-audio] DB保存エラー:', dbError.message);
+        else console.log('[generate-audio] DB保存完了');
+      } catch (dbErr) {
+        console.error('[generate-audio] DB保存例外:', dbErr.message);
+      }
     }
 
     res.json({ success: true, url, localFile: filePath, error: deployError });
@@ -429,23 +437,33 @@ ${transcription}`;
 // ─── 履歴取得 ─────────────────────────────────────────────────────────────────
 app.get('/api/history', async (req, res) => {
   if (!supabase) return res.json({ feedbacks: [] });
-  const { data, error } = await supabase
-    .from('feedbacks')
-    .select('id, player_name, match_date, surge_url, created_at')
-    .order('created_at', { ascending: false });
-  if (error) console.error('[history]', error.message);
-  res.json({ feedbacks: data || [] });
+  try {
+    const { data, error } = await supabase
+      .from('feedbacks')
+      .select('id, player_name, match_date, surge_url, created_at')
+      .order('created_at', { ascending: false });
+    if (error) console.error('[history] supabase error:', error.message);
+    res.json({ feedbacks: data || [] });
+  } catch (err) {
+    console.error('[history] fetch error:', err.message);
+    res.json({ feedbacks: [] });
+  }
 });
 
 app.get('/api/history/:playerName', async (req, res) => {
   if (!supabase) return res.json({ feedbacks: [] });
-  const { data, error } = await supabase
-    .from('feedbacks')
-    .select('id, player_name, match_date, surge_url, created_at, transcription_text')
-    .eq('player_name', req.params.playerName)
-    .order('created_at', { ascending: false });
-  if (error) console.error('[history/:playerName]', error.message);
-  res.json({ feedbacks: data || [] });
+  try {
+    const { data, error } = await supabase
+      .from('feedbacks')
+      .select('id, player_name, match_date, surge_url, created_at, transcription_text')
+      .eq('player_name', req.params.playerName)
+      .order('created_at', { ascending: false });
+    if (error) console.error('[history/:playerName] supabase error:', error.message);
+    res.json({ feedbacks: data || [] });
+  } catch (err) {
+    console.error('[history/:playerName] fetch error:', err.message);
+    res.json({ feedbacks: [] });
+  }
 });
 
 // ─── ヘルスチェック ────────────────────────────────────────────────────────────
