@@ -440,7 +440,7 @@ app.get('/api/history', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('feedbacks')
-      .select('id, player_name, match_date, surge_url, created_at')
+      .select('id, player_name, match_date, surge_url, created_at, transcription_text')
       .order('created_at', { ascending: false });
     if (error) console.error('[history] supabase error:', error.message);
     res.json({ feedbacks: data || [] });
