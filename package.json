@@ -1,0 +1,15 @@
+{
+  "name": "soft-tennis-analyzer",
+  "version": "1.0.0",
+  "description": "ソフトテニス試合フィードバック自動生成ツール",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "multer": "^2.2.0"
+  }
+}

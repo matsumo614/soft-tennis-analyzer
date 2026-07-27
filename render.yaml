@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: soft-tennis-analyzer
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-flash-lite-latest
+      - key: SURGE_TOKEN
+        sync: false
+      - key: NODE_ENV
+        value: production

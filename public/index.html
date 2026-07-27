@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ソフトテニス フィードバック生成ツール</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Noto Sans JP"', '"Hiragino Sans"', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid #e2e8f0;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .dropzone-active {
+      border-color: #3b82f6;
+      background-color: #eff6ff;
+    }
+    .tab-active {
+      background-color: white;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      color: #1e293b;
+      font-weight: 900;
+    }
+    .tab-inactive {
+      color: #94a3b8;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body class="bg-slate-50 font-sans min-h-screen">
+
+  <div class="max-w-2xl mx-auto px-4 py-10 md:py-16">
+
+    <!-- ヘッダー -->
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center gap-2 bg-blue-500/10 text-blue-700 px-4 py-1.5 rounded-full text-sm font-bold mb-4">
+        ソフトテニス コーチング
+      </div>
+      <h1 class="text-2xl md:text-3xl font-black text-slate-900 mb-2">
+        フィードバック図解生成ツール
+      </h1>
+      <p class="text-slate-500 text-sm">
+        音声ファイルまたは文字起こしテキストから<br>図解フィードバックページを自動生成します
+      </p>
+    </div>
+
+    <!-- フォームカード -->
+    <div class="bg-white rounded-2xl border border-slate-200 p-6 md:p-8 shadow-sm">
+
+      <!-- 選手名・日付 -->
+      <div class="grid grid-cols-2 gap-4 mb-6">
+        <div>
+          <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">選手名</label>
+          <input id="playerName" type="text" placeholder="例：江島くん"
+            class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">日付</label>
+          <input id="date" type="date"
+            class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+        </div>
+      </div>
+
+      <!-- タブ切り替え -->
+      <div class="flex bg-slate-100 rounded-xl p-1 mb-6 gap-1">
+        <button id="tabText" onclick="setMode('text')"
+          class="flex-1 py-2 px-3 rounded-lg text-sm transition-all tab-active">
+          文字起こしテキスト
+        </button>
+        <button id="tabAudio" onclick="setMode('audio')"
+          class="flex-1 py-2 px-3 rounded-lg text-sm transition-all tab-inactive">
+          音声ファイル
+        </button>
+      </div>
+
+      <!-- テキスト入力エリア -->
+      <div id="textMode">
+        <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">
+          文字起こしテキスト
+        </label>
+        <textarea id="transcription"
+          placeholder="Geminiなどで文字起こしした解説テキストをここに貼り付けてください..."
+          class="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none leading-relaxed"
+          rows="10"></textarea>
+        <p class="text-xs text-slate-400 mt-1.5">話し言葉のままで問題ありません。AIが要点を整理します。</p>
+      </div>
+
+      <!-- 音声ファイルエリア -->
+      <div id="audioMode" class="hidden">
+        <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">
+          音声ファイル
+        </label>
+        <div id="dropzone"
+          class="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center cursor-pointer transition-colors hover:border-blue-400 hover:bg-blue-50/30"
+          onclick="document.getElementById('audioFile').click()"
+          ondragover="onDragOver(event)"
+          ondragleave="onDragLeave(event)"
+          ondrop="onDrop(event)">
+          <div class="text-4xl mb-2">🎙️</div>
+          <p class="text-sm font-bold text-slate-700 mb-0.5">クリックまたはドロップ</p>
+          <p class="text-xs text-slate-400">m4a・mp3・wav・aac・flac 対応（最大500MB）</p>
+          <p id="fileName" class="text-sm font-bold text-blue-600 mt-3 hidden"></p>
+        </div>
+        <input id="audioFile" type="file" accept="audio/*" class="hidden" onchange="onFileSelect(this)">
+        <p class="text-xs text-slate-400 mt-1.5">音声は一度Geminiにアップロードして処理します（処理に少し時間がかかります）</p>
+      </div>
+
+      <!-- 選手の反省メモ -->
+      <div class="mt-6 pt-6 border-t border-slate-100">
+        <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">
+          選手の反省メモ <span class="text-slate-400 font-normal normal-case">（任意）</span>
+        </label>
+        <textarea id="playerNotes"
+          placeholder="例：&#10;・サービスダッシュ時の角度のついたレシーブが取れない&#10;・気持ちが顔に出てしまっていた&#10;&#10;入力するとコーチのフィードバックに選手自身の反省への回答が加わります"
+          class="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none leading-relaxed"
+          rows="4"></textarea>
+      </div>
+
+      <!-- 生成ボタン -->
+      <button id="generateBtn" onclick="generate()"
+        class="w-full mt-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-black py-3.5 px-6 rounded-xl text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+        図解を生成する →
+      </button>
+    </div>
+
+    <!-- ローディング -->
+    <div id="loading" class="hidden mt-4 bg-white rounded-2xl border border-slate-200 p-6 text-center shadow-sm">
+      <div class="spinner mx-auto mb-3"></div>
+      <p id="loadingMsg" class="text-sm font-bold text-slate-700">AIがフィードバックを生成中...</p>
+      <p class="text-xs text-slate-400 mt-1">しばらくお待ちください（30秒〜1分程度）</p>
+    </div>
+
+    <!-- 完了 -->
+    <div id="result" class="hidden mt-4 bg-emerald-50 border border-emerald-200 rounded-2xl p-6 shadow-sm">
+      <div class="text-center mb-4">
+        <div class="text-2xl mb-1">✅</div>
+        <p class="font-black text-slate-900 text-base">図解が完成しました</p>
+        <p class="text-xs text-slate-500 mt-0.5">以下のURLをLINEやメールで送れます</p>
+      </div>
+      <div class="bg-white border border-emerald-200 rounded-xl px-4 py-3 flex items-center gap-3">
+        <a id="resultUrl" href="#" target="_blank" rel="noopener"
+          class="text-blue-600 font-bold text-sm truncate flex-1 hover:underline"></a>
+        <button id="copyBtn" onclick="copyUrl()"
+          class="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-blue-700 flex-shrink-0 transition-colors">
+          コピー
+        </button>
+      </div>
+      <div class="mt-3 text-center">
+        <button onclick="openUrl()" class="text-xs text-blue-600 hover:underline font-bold">ブラウザで確認する →</button>
+      </div>
+    </div>
+
+    <!-- エラー -->
+    <div id="errorBox" class="hidden mt-4 bg-red-50 border border-red-200 rounded-2xl p-5 shadow-sm">
+      <p class="font-bold text-red-700 text-sm mb-1">エラーが発生しました</p>
+      <p id="errorText" class="text-sm text-red-600"></p>
+      <p class="text-xs text-slate-400 mt-3">問題が解決しない場合は、Cursorのチャットで状況を伝えてください。</p>
+    </div>
+
+  </div>
+
+  <script>
+    let currentMode = 'text';
+    let currentUrl = '';
+
+    // 今日の日付をデフォルトに
+    document.getElementById('date').value = new Date().toISOString().slice(0, 10);
+
+    function setMode(mode) {
+      currentMode = mode;
+      document.getElementById('textMode').classList.toggle('hidden', mode !== 'text');
+      document.getElementById('audioMode').classList.toggle('hidden', mode !== 'audio');
+
+      const tabText = document.getElementById('tabText');
+      const tabAudio = document.getElementById('tabAudio');
+
+      if (mode === 'text') {
+        tabText.className = 'flex-1 py-2 px-3 rounded-lg text-sm transition-all tab-active';
+        tabAudio.className = 'flex-1 py-2 px-3 rounded-lg text-sm transition-all tab-inactive';
+      } else {
+        tabAudio.className = 'flex-1 py-2 px-3 rounded-lg text-sm transition-all tab-active';
+        tabText.className = 'flex-1 py-2 px-3 rounded-lg text-sm transition-all tab-inactive';
+      }
+    }
+
+    function onFileSelect(input) {
+      const file = input.files[0];
+      if (file) showFileName(file.name);
+    }
+
+    function showFileName(name) {
+      const el = document.getElementById('fileName');
+      el.textContent = `📎 ${name}`;
+      el.classList.remove('hidden');
+    }
+
+    function onDragOver(e) {
+      e.preventDefault();
+      document.getElementById('dropzone').classList.add('dropzone-active');
+    }
+
+    function onDragLeave(e) {
+      document.getElementById('dropzone').classList.remove('dropzone-active');
+    }
+
+    function onDrop(e) {
+      e.preventDefault();
+      document.getElementById('dropzone').classList.remove('dropzone-active');
+      const file = e.dataTransfer.files[0];
+      if (file && file.type.startsWith('audio/')) {
+        const input = document.getElementById('audioFile');
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        showFileName(file.name);
+      }
+    }
+
+    function setLoading(show, msg) {
+      document.getElementById('loading').classList.toggle('hidden', !show);
+      document.getElementById('generateBtn').disabled = show;
+      if (msg) document.getElementById('loadingMsg').textContent = msg;
+    }
+
+    function showResult(url) {
+      currentUrl = url;
+      document.getElementById('result').classList.remove('hidden');
+      document.getElementById('errorBox').classList.add('hidden');
+      const link = document.getElementById('resultUrl');
+      link.href = url;
+      link.textContent = url;
+    }
+
+    function showError(msg) {
+      document.getElementById('errorBox').classList.remove('hidden');
+      document.getElementById('result').classList.add('hidden');
+      document.getElementById('errorText').textContent = msg;
+    }
+
+    function hideAll() {
+      document.getElementById('result').classList.add('hidden');
+      document.getElementById('errorBox').classList.add('hidden');
+    }
+
+    function copyUrl() {
+      navigator.clipboard.writeText(currentUrl).then(() => {
+        const btn = document.getElementById('copyBtn');
+        btn.textContent = 'コピー済！';
+        btn.classList.replace('bg-blue-600', 'bg-emerald-600');
+        setTimeout(() => {
+          btn.textContent = 'コピー';
+          btn.classList.replace('bg-emerald-600', 'bg-blue-600');
+        }, 2000);
+      });
+    }
+
+    function openUrl() {
+      if (currentUrl) window.open(currentUrl, '_blank', 'noopener');
+    }
+
+    async function generate() {
+      hideAll();
+
+      const playerName = document.getElementById('playerName').value.trim();
+      const date = document.getElementById('date').value;
+      const playerNotes = document.getElementById('playerNotes').value.trim();
+
+      if (currentMode === 'text') {
+        const text = document.getElementById('transcription').value.trim();
+        if (text.length < 20) {
+          showError('テキストが短すぎます。文字起こしテキストを貼り付けてください。');
+          return;
+        }
+
+        setLoading(true, 'AIがフィードバックを生成中...');
+
+        try {
+          const res = await fetch('/api/generate-text', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, playerName, date, playerNotes }),
+          });
+
+          const data = await res.json();
+
+          if (!res.ok) {
+            showError(data.error || '不明なエラーが発生しました');
+            return;
+          }
+
+          if (data.url) {
+            showResult(data.url);
+          } else {
+            showError(
+              `HTML生成は完了しましたが、Surgeへのデプロイに失敗しました。\n` +
+              `ローカルファイル: ${data.localFile}\n` +
+              `エラー: ${data.error || 'Surge未ログイン？'}`
+            );
+          }
+        } catch (err) {
+          showError(`通信エラー: ${err.message}`);
+        }
+
+      } else {
+        const file = document.getElementById('audioFile').files[0];
+        if (!file) {
+          showError('音声ファイルを選択してください');
+          return;
+        }
+
+        setLoading(true, '音声をGeminiにアップロード中...');
+
+        try {
+          const formData = new FormData();
+          formData.append('audio', file);
+          formData.append('playerName', playerName);
+          formData.append('date', date);
+          formData.append('playerNotes', playerNotes);
+
+          // ステップに応じてメッセージを更新
+          const timer1 = setTimeout(() => {
+            document.getElementById('loadingMsg').textContent = '音声を文字起こし中（編集なし）...';
+          }, 5000);
+          const timer = setTimeout(() => {
+            document.getElementById('loadingMsg').textContent = 'AIがフィードバックを生成中...';
+            clearTimeout(timer1);
+          }, 30000);
+
+          const res = await fetch('/api/generate-audio', {
+            method: 'POST',
+            body: formData,
+          });
+
+          clearTimeout(timer);
+          clearTimeout(timer1);
+          const data = await res.json();
+
+          if (!res.ok) {
+            showError(data.error || '不明なエラーが発生しました');
+            return;
+          }
+
+          if (data.url) {
+            showResult(data.url);
+          } else {
+            showError(
+              `HTML生成は完了しましたが、Surgeへのデプロイに失敗しました。\n` +
+              `ローカルファイル: ${data.localFile}\n` +
+              `エラー: ${data.error || 'Surge未ログイン？'}`
+            );
+          }
+        } catch (err) {
+          showError(`通信エラー: ${err.message}`);
+        }
+      }
+
+      setLoading(false);
+    }
+  </script>
+</body>
+</html>
