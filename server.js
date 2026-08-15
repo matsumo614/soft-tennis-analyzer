@@ -31,6 +31,12 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
 
+// 使用中のモデルが混雑している間も生成を止めないための代替モデル
+const FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || 'gemini-flash-latest,gemini-2.5-flash')
+  .split(',')
+  .map(name => name.trim())
+  .filter(name => name && name !== MODEL);
+
 // Geminiの入力上限は1,048,576トークン。安全マージンを取った値で事前に弾く
 const MAX_INPUT_TOKENS = 900000;
 // 文字起こしが繰り返しループに陥ったとき、後続プロンプトが膨張するのを防ぐ上限
@@ -202,6 +208,40 @@ const SYSTEM_PROMPT = `あなたはソフトテニスのコーチングフィー
 - <!-- CONTENT_START --> や <!-- CONTENT_END --> は含めない
 `;
 
+// ─── Gemini呼び出し ───────────────────────────────────────────────────────────
+
+// モデルの混雑（503）やレート制限（429）は数十秒待てば復旧することが多い。
+// 待っても直らない場合は代替モデルに切り替えて生成を完了させる。
+const RETRYABLE_ERROR = /\b(429|500|502|503|504)\b|fetch failed|high demand|overloaded|rate limit/i;
+
+async function generateContentWithRetry(parts, attemptsPerModel = 3) {
+  let lastError;
+
+  for (const modelName of [MODEL, ...FALLBACK_MODELS]) {
+    const model = genAI.getGenerativeModel({ model: modelName });
+
+    for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
+      try {
+        return await model.generateContent(parts);
+      } catch (err) {
+        lastError = err;
+        if (!RETRYABLE_ERROR.test(err.message || '')) throw err;
+
+        const waitMs = 5000 * attempt;
+        console.warn(
+          `[gemini] ${modelName} が一時エラー (${attempt}/${attemptsPerModel}): `
+          + `${(err.message || '').slice(0, 120)} — ${waitMs / 1000}秒後に再試行`
+        );
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+      }
+    }
+
+    console.warn(`[gemini] ${modelName} が復旧しないため代替モデルに切り替えます`);
+  }
+
+  throw lastError;
+}
+
 // ─── ユーティリティ ────────────────────────────────────────────────────────────
 
 // ブラウザやcurlは .m4a などを application/octet-stream として送ってくることがある。
@@ -295,8 +335,6 @@ app.post('/api/generate-text', async (req, res) => {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: MODEL });
-
     const playerNotesSection = playerNotes && playerNotes.trim()
       ? `\n\n【選手の反省メモ（これらの点に必ずフィードバックすること）】\n${playerNotes.trim()}`
       : '';
@@ -311,7 +349,7 @@ ${playerNotesSection}
 コーチング内容（文字起こし）:
 ${text}`;
 
-    const result = await model.generateContent(prompt);
+    const result = await generateContentWithRetry(prompt);
     const htmlContent = cleanGeneratedHTML(result.response.text());
 
     const slug = generateSlug(playerName, date);
@@ -422,10 +460,10 @@ app.post('/api/generate-audio', withMulter(async (req, res) => {
       throw new Error('音声ファイルの処理がタイムアウトしました');
     }
 
-    const model = genAI.getGenerativeModel({ model: MODEL });
+    const countingModel = genAI.getGenerativeModel({ model: MODEL });
     const audioPart = { fileData: { mimeType: file.mimeType, fileUri: file.uri } };
 
-    const { totalTokens } = await model.countTokens([audioPart, { text: TRANSCRIPTION_PROMPT }]);
+    const { totalTokens } = await countingModel.countTokens([audioPart, { text: TRANSCRIPTION_PROMPT }]);
     console.log(`[audio] 入力トークン数: ${totalTokens}`);
 
     if (totalTokens > MAX_INPUT_TOKENS) {
@@ -437,7 +475,7 @@ app.post('/api/generate-audio', withMulter(async (req, res) => {
     }
 
     // Step 2: 忠実な文字起こし（編集なし）
-    const transcriptionResult = await model.generateContent([audioPart, { text: TRANSCRIPTION_PROMPT }]);
+    const transcriptionResult = await generateContentWithRetry([audioPart, { text: TRANSCRIPTION_PROMPT }]);
     let transcription = transcriptionResult.response.text().trim();
 
     if (transcription.length > MAX_TRANSCRIPTION_CHARS) {
@@ -462,7 +500,7 @@ ${playerNotesSection}
 コーチング内容（文字起こし）:
 ${transcription}`;
 
-    const result = await model.generateContent(prompt);
+    const result = await generateContentWithRetry(prompt);
 
     const htmlContent = cleanGeneratedHTML(result.response.text());
 
@@ -603,7 +641,15 @@ app.get('/api/health', async (_, res) => {
     }
   }
 
-  res.json({ status: 'ok', model: MODEL, node: process.version, db: !!supabase, dbStatus, rawFetchStatus });
+  res.json({
+    status: 'ok',
+    model: MODEL,
+    fallbackModels: FALLBACK_MODELS,
+    node: process.version,
+    db: !!supabase,
+    dbStatus,
+    rawFetchStatus,
+  });
 });
 
 // ─── グローバルエラーハンドラー ───────────────────────────────────────────────
