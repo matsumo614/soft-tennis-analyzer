@@ -53,7 +53,7 @@
 
 ```
 GEMINI_API_KEY=REDACTED_GEMINI_API_KEY
-GEMINI_MODEL=gemini-flash-lite-latest
+GEMINI_MODEL=gemini-flash-latest
 SURGE_TOKEN=REDACTED_SURGE_TOKEN
 PORT=3001
 ```
@@ -215,25 +215,41 @@ app.get('/api/history/:playerName', async (req, res) => {
 
 ---
 
-## 7. Renderへの公開デプロイ（未完了）
+## 7. Renderへの公開デプロイ（完了済み）
 
-GitHubリポジトリへのpushとRenderデプロイがまだ完了していない。
-手順は前のチャットの指示を参照。または：
+本番URL：https://soft-tennis-analyzer.onrender.com/
+GitHub：https://github.com/matsumo614/soft-tennis-analyzer （`main` へのpushで自動デプロイ）
 
-1. `gh` CLIをインストールして：
-```bash
-brew install gh
-gh auth login
-gh repo create soft-tennis-analyzer --public --source=. --push
-```
+環境変数（GEMINI_API_KEY, SURGE_TOKEN, GEMINI_MODEL, SUPABASE_URL, SUPABASE_ANON_KEY）はRender側で設定済み。
 
-2. Renderで環境変数（GEMINI_API_KEY, SURGE_TOKEN, GEMINI_MODEL, SUPABASE_URL, SUPABASE_ANON_KEY）を設定してデプロイ。
+**注意**：Renderダッシュボードで環境変数を手動設定している場合、`render.yaml` の値より
+ダッシュボードの値が優先される。モデルを変えるときはダッシュボード側も確認すること。
 
 ---
 
-## 8. 注意事項
+## 8. 2026-08-15 に修正した不具合
 
-- Geminiの利用可能モデル：`gemini-flash-lite-latest`（他のgemini-1.5系・2.5系は新規アカウントで制限あり）
+長い音声（10分以上）をアップロードすると必ず失敗していた問題を修正した。
+
+| 症状 | 原因 | 対応 |
+|---|---|---|
+| `The input token count exceeds the maximum number of tokens allowed 1048576` | ブラウザやcurlが `.m4a` を `application/octet-stream` として送信し、その値をそのままGeminiへ渡していた。Geminiは音声ではなく生バイト列として解釈するため、数十MBのファイルが軽く100万トークンを超える | `resolveAudioMimeType()` で拡張子から必ず正しいMIMEに補正する |
+| 文字起こしが暴走（15分の音声から12万文字） | `gemini-flash-lite-latest` が繰り返しループに陥る | モデルを `gemini-flash-latest` に変更。併せて `MAX_TRANSCRIPTION_CHARS` で上限を設定 |
+| 5分以上かかる文字起こしが `fetch failed` になる | Node標準fetch（undici）のheadersTimeoutが既定300秒 | `undici` の `setGlobalDispatcher` でタイムアウトを20分に引き上げ |
+| エラー時に画面が固まる（スピナーが回り続ける） | フロントの `generate()` がエラー時に `setLoading(false)` を通らず `return` していた | `try/finally` に整理 |
+| 音声をドラッグ＆ドロップしても無反応 | `file.type.startsWith('audio/')` だけで判定していたため、`application/octet-stream` のファイルが黙って捨てられていた | 拡張子でも判定し、弾く場合は理由を表示 |
+| 履歴タブが重い（レスポンス571KB） | `/api/history` が全件の文字起こし本文を返していた | 一覧からは本文を除外し、`/api/history/:id/transcription` で個別取得（4.9KBに縮小） |
+
+検証結果（21分・53MBの音声）：入力40,927トークン、文字起こし8,214文字、約4分で完了。
+
+---
+
+## 9. 注意事項
+
+- 利用可能なGeminiモデルは増えている（`gemini-3.7-flash`、`gemini-2.5-pro` なども利用可）。
+  「2.5系は新規アカウントで制限あり」という以前の記述はもう当てはまらない
 - Surgeドメインは英数字のみ対応。日本語の選手名はスラッグから自動除去される（URLの選手名は `player` になるが、HTML内容には正しく表示）
 - 音声→文字起こしには`TRANSCRIPTION_PROMPT`という専用プロンプトで「編集なし・忠実な文字起こし」を実現している
 - 選手の反省メモ（`playerNotes`）が入力されると、AIがその反省点に対してコーチ視点でフィードバックを追加する
+- Supabaseのanonキーは参照と追加のみ許可されており、削除はできない。
+  レコードを消すときはSupabaseダッシュボードのSQL Editorから実行する

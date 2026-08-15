@@ -9,6 +9,15 @@ const { execSync } = require('child_process');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { GoogleAIFileManager } = require('@google/generative-ai/server');
 const { createClient } = require('@supabase/supabase-js');
+const { Agent, setGlobalDispatcher } = require('undici');
+
+// 長い音声の文字起こしは応答が返るまで5分以上かかることがある。
+// Node標準fetchの既定値（headersTimeout 300秒）のままだと途中で fetch failed になるため引き上げる。
+setGlobalDispatcher(new Agent({
+  connectTimeout: 30_000,
+  headersTimeout: 20 * 60_000,
+  bodyTimeout: 20 * 60_000,
+}));
 
 // ─── 起動チェック ────────────────────────────────────────────────────────────
 if (!process.env.GEMINI_API_KEY) {
@@ -20,7 +29,12 @@ if (!process.env.GEMINI_API_KEY) {
 // ─── 初期化 ──────────────────────────────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 3001;
-const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+
+// Geminiの入力上限は1,048,576トークン。安全マージンを取った値で事前に弾く
+const MAX_INPUT_TOKENS = 900000;
+// 文字起こしが繰り返しループに陥ったとき、後続プロンプトが膨張するのを防ぐ上限
+const MAX_TRANSCRIPTION_CHARS = 60000;
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -189,6 +203,32 @@ const SYSTEM_PROMPT = `あなたはソフトテニスのコーチングフィー
 `;
 
 // ─── ユーティリティ ────────────────────────────────────────────────────────────
+
+// ブラウザやcurlは .m4a などを application/octet-stream として送ってくることがある。
+// その値をそのままGeminiに渡すと音声ではなく生バイト列として解釈され、
+// 40MBの音声で1,048,576トークンを超えて 400 エラーになる。拡張子から必ず補正する。
+const AUDIO_MIME_BY_EXT = {
+  '.m4a': 'audio/mp4',
+  '.mp4': 'audio/mp4',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.aif': 'audio/aiff',
+  '.aiff': 'audio/aiff',
+  '.webm': 'audio/webm',
+};
+
+function resolveAudioMimeType(originalName, reportedMimeType) {
+  const byExt = AUDIO_MIME_BY_EXT[path.extname(originalName || '').toLowerCase()];
+  if (byExt) return byExt;
+  if (reportedMimeType && reportedMimeType.startsWith('audio/')) return reportedMimeType;
+  return null;
+}
+
 function generateSlug(playerName, date) {
   // 日本語を含む名前はローマ字風の短縮形に変換（Surgeドメインは英数字のみ）
   const cleanName = (playerName || 'player')
@@ -321,14 +361,43 @@ ${text}`;
 });
 
 // ─── 音声から生成（2ステップ：忠実な文字起こし → フィードバック生成） ────────
-app.post('/api/generate-audio', upload.single('audio'), async (req, res) => {
+// multer のエラー（サイズ超過など）をハンドラー内で捕捉して JSON で返す
+function withMulter(handler) {
+  return (req, res, next) => {
+    upload.single('audio')(req, res, (err) => {
+      if (err) {
+        console.error('[multer error]', err.message);
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(413).json({ error: 'ファイルサイズが大きすぎます（最大500MB）' });
+        }
+        return res.status(400).json({ error: `ファイルのアップロードに失敗しました: ${err.message}` });
+      }
+      handler(req, res, next);
+    });
+  };
+}
+
+app.post('/api/generate-audio', withMulter(async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: '音声ファイルが見つかりません' });
   }
 
   const { playerName, date, playerNotes } = req.body;
   const audioPath = req.file.path;
-  const mimeType = req.file.mimetype || 'audio/mp4';
+  const mimeType = resolveAudioMimeType(req.file.originalname, req.file.mimetype);
+
+  if (!mimeType) {
+    fs.unlink(audioPath, () => {});
+    return res.status(400).json({
+      error: `対応していない音声形式です（${req.file.originalname || 'ファイル名不明'}）。`
+        + 'm4a・mp3・wav・aac・flac のいずれかをアップロードしてください。',
+    });
+  }
+
+  console.log(
+    `[audio] ${req.file.originalname} / ${(req.file.size / 1024 / 1024).toFixed(1)}MB`
+    + ` / 受信mime=${req.file.mimetype} → 使用mime=${mimeType}`
+  );
 
   let uploadedFileName = null;
 
@@ -354,13 +423,27 @@ app.post('/api/generate-audio', upload.single('audio'), async (req, res) => {
     }
 
     const model = genAI.getGenerativeModel({ model: MODEL });
+    const audioPart = { fileData: { mimeType: file.mimeType, fileUri: file.uri } };
+
+    const { totalTokens } = await model.countTokens([audioPart, { text: TRANSCRIPTION_PROMPT }]);
+    console.log(`[audio] 入力トークン数: ${totalTokens}`);
+
+    if (totalTokens > MAX_INPUT_TOKENS) {
+      const limitMinutes = Math.floor(MAX_INPUT_TOKENS / 32 / 60);
+      throw new Error(
+        `音声が長すぎてAIが一度に処理できません（上限の約${limitMinutes}分を超えています）。`
+        + '音声を分割してアップロードしてください。'
+      );
+    }
 
     // Step 2: 忠実な文字起こし（編集なし）
-    const transcriptionResult = await model.generateContent([
-      { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
-      { text: TRANSCRIPTION_PROMPT },
-    ]);
-    const transcription = transcriptionResult.response.text().trim();
+    const transcriptionResult = await model.generateContent([audioPart, { text: TRANSCRIPTION_PROMPT }]);
+    let transcription = transcriptionResult.response.text().trim();
+
+    if (transcription.length > MAX_TRANSCRIPTION_CHARS) {
+      console.warn(`[audio] 文字起こしが異常に長いため切り詰めます: ${transcription.length}文字`);
+      transcription = transcription.slice(0, MAX_TRANSCRIPTION_CHARS);
+    }
 
     console.log(`[audio] 文字起こし完了: ${transcription.length}文字`);
 
@@ -434,21 +517,42 @@ ${transcription}`;
     // ローカルの一時ファイルを削除
     fs.unlink(audioPath, () => {});
   }
-});
+}));
 
 // ─── 履歴取得 ─────────────────────────────────────────────────────────────────
+// 一覧では文字起こし本文を返さない（全件分を含めるとレスポンスが数百KBに膨らむため、
+// 本文は「文字起こしを見る」を押したときに個別取得する）
 app.get('/api/history', async (req, res) => {
   if (!supabase) return res.json({ feedbacks: [] });
   try {
     const { data, error } = await supabase
       .from('feedbacks')
-      .select('id, player_name, match_date, surge_url, created_at, transcription_text')
+      .select('id, player_name, match_date, surge_url, created_at')
       .order('created_at', { ascending: false });
     if (error) console.error('[history] supabase error:', error.message);
     res.json({ feedbacks: data || [] });
   } catch (err) {
     console.error('[history] fetch error:', err.message);
     res.json({ feedbacks: [] });
+  }
+});
+
+app.get('/api/history/:id/transcription', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'データベースが設定されていません' });
+  try {
+    const { data, error } = await supabase
+      .from('feedbacks')
+      .select('transcription_text')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (error) {
+      console.error('[transcription] supabase error:', error.message);
+      return res.status(500).json({ error: '文字起こしの取得に失敗しました' });
+    }
+    res.json({ transcription: (data && data.transcription_text) || '' });
+  } catch (err) {
+    console.error('[transcription] fetch error:', err.message);
+    res.status(500).json({ error: '文字起こしの取得に失敗しました' });
   }
 });
 
@@ -500,6 +604,29 @@ app.get('/api/health', async (_, res) => {
   }
 
   res.json({ status: 'ok', model: MODEL, node: process.version, db: !!supabase, dbStatus, rawFetchStatus });
+});
+
+// ─── グローバルエラーハンドラー ───────────────────────────────────────────────
+// multer・express.json などミドルウェアが next(err) を呼んだ場合も
+// HTML ではなく JSON で返す（フロントエンドの JSON.parse エラーを防ぐ）
+app.use((err, req, res, next) => {
+  console.error('[unhandled error]', err.message || err);
+
+  // multer のファイルサイズ超過エラー
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: 'ファイルサイズが大きすぎます（最大500MB）' });
+  }
+  // express.json のリクエストボディ超過エラー
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'リクエストデータが大きすぎます' });
+  }
+  // express.json の JSON 解析エラー
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'リクエストの形式が正しくありません' });
+  }
+
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({ error: err.message || '予期しないエラーが発生しました' });
 });
 
 // ─── 起動 ─────────────────────────────────────────────────────────────────────

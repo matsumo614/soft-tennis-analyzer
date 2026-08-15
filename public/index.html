@@ -160,7 +160,7 @@
     <div id="loading" class="hidden mt-4 bg-white rounded-2xl border border-slate-200 p-6 text-center shadow-sm">
       <div class="spinner mx-auto mb-3"></div>
       <p id="loadingMsg" class="text-sm font-bold text-slate-700">AIがフィードバックを生成中...</p>
-      <p class="text-xs text-slate-400 mt-1">しばらくお待ちください（30秒〜1分程度）</p>
+      <p id="loadingNote" class="text-xs text-slate-400 mt-1">しばらくお待ちください</p>
     </div>
 
     <!-- 完了 -->
@@ -292,14 +292,34 @@
       renderHistory(filtered);
     }
 
-    function toggleTranscription(id) {
-      const el = document.getElementById(id);
-      el.classList.toggle('hidden');
+    const transcriptionCache = {};
+
+    async function toggleTranscription(id) {
+      const box = document.getElementById(`tx-${id}`);
+      const wasHidden = box.classList.contains('hidden');
+      box.classList.toggle('hidden');
+
+      if (!wasHidden || transcriptionCache[id] !== undefined) return;
+
+      const body = document.getElementById(`tx-${id}-body`);
+      body.textContent = '読み込み中...';
+
+      try {
+        const res = await fetch(`/api/history/${id}/transcription`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '取得に失敗しました');
+        transcriptionCache[id] = data.transcription || '';
+        body.textContent = transcriptionCache[id] || '（この記録には文字起こしが保存されていません）';
+      } catch (err) {
+        body.textContent = `読み込みに失敗しました: ${err.message}`;
+      }
     }
 
-    function copyTranscription(btnId, text) {
+    function copyTranscription(id) {
+      const text = transcriptionCache[id];
+      if (!text) return;
       navigator.clipboard.writeText(text).then(() => {
-        const btn = document.getElementById(btnId);
+        const btn = document.getElementById(`tx-${id}-btn`);
         btn.textContent = 'コピー済！';
         btn.classList.add('bg-emerald-100', 'text-emerald-700');
         setTimeout(() => {
@@ -327,13 +347,6 @@
         const createdAt = new Date(f.created_at).toLocaleDateString('ja-JP', {
           year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
         });
-        const urlDisplay = f.surge_url || '（URLなし）';
-
-        const hasTranscription = f.transcription_text && f.transcription_text.trim().length > 0;
-        const escapedText = hasTranscription
-          ? f.transcription_text.replace(/`/g, '\\`').replace(/\$/g, '\\$')
-          : '';
-
         return `
           <div class="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm hover:border-blue-300 transition-colors">
             <div class="flex items-start justify-between gap-3 mb-3">
@@ -357,21 +370,21 @@
                 : ''
               }
             </div>
-            ${hasTranscription ? `
             <div class="border-t border-slate-100 pt-3">
-              <button onclick="toggleTranscription('tx-${f.id}')"
+              <button onclick="toggleTranscription('${f.id}')"
                 class="text-xs text-slate-500 hover:text-slate-700 font-bold flex items-center gap-1">
                 📝 文字起こしを見る／コピー
               </button>
               <div id="tx-${f.id}" class="hidden mt-2">
-                <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700 leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap">${f.transcription_text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
-                <button onclick="copyTranscription('tx-${f.id}-btn', \`${escapedText}\`)"
+                <div id="tx-${f.id}-body"
+                  class="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700 leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap"></div>
+                <button onclick="copyTranscription('${f.id}')"
                   id="tx-${f.id}-btn"
                   class="mt-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold px-3 py-1.5 rounded-lg transition-colors">
                   コピー
                 </button>
               </div>
-            </div>` : ''}
+            </div>
           </div>`;
       }).join('');
     }
@@ -394,6 +407,15 @@
         tabAudio.className = 'flex-1 py-2 px-3 rounded-lg text-sm transition-all tab-active';
         tabText.className = 'flex-1 py-2 px-3 rounded-lg text-sm transition-all tab-inactive';
       }
+    }
+
+    const AUDIO_EXT_RE = /\.(m4a|mp4|mp3|wav|aac|flac|ogg|oga|opus|aif|aiff|webm)$/i;
+
+    // ブラウザが .m4a などを application/octet-stream と報告することがあるため、
+    // MIMEタイプだけで判定せず拡張子でも許可する
+    function isAudioFile(file) {
+      if (file.type && file.type.startsWith('audio/')) return true;
+      return AUDIO_EXT_RE.test(file.name || '');
     }
 
     function onFileSelect(input) {
@@ -420,19 +442,47 @@
       e.preventDefault();
       document.getElementById('dropzone').classList.remove('dropzone-active');
       const file = e.dataTransfer.files[0];
-      if (file && file.type.startsWith('audio/')) {
-        const input = document.getElementById('audioFile');
-        const dt = new DataTransfer();
-        dt.items.add(file);
-        input.files = dt.files;
-        showFileName(file.name);
+      if (!file) return;
+
+      if (!isAudioFile(file)) {
+        showError(`音声ファイルではないようです（${file.name}）。m4a・mp3・wav・aac・flac のいずれかをドロップしてください。`);
+        return;
       }
+
+      hideAll();
+      const input = document.getElementById('audioFile');
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      showFileName(file.name);
+    }
+
+    let elapsedTimer = null;
+
+    function setLoadingMsg(msg) {
+      document.getElementById('loadingMsg').textContent = msg;
     }
 
     function setLoading(show, msg) {
       document.getElementById('loading').classList.toggle('hidden', !show);
       document.getElementById('generateBtn').disabled = show;
       if (msg) document.getElementById('loadingMsg').textContent = msg;
+
+      clearInterval(elapsedTimer);
+      elapsedTimer = null;
+      if (!show) return;
+
+      // 音声の文字起こしは数分かかることがあるため、止まっていないことが分かるよう経過時間を出す
+      const startedAt = Date.now();
+      const note = document.getElementById('loadingNote');
+      const tick = () => {
+        const total = Math.floor((Date.now() - startedAt) / 1000);
+        const mm = Math.floor(total / 60);
+        const ss = String(total % 60).padStart(2, '0');
+        note.textContent = `経過 ${mm}分${ss}秒 ／ この画面は閉じないでください`;
+      };
+      tick();
+      elapsedTimer = setInterval(tick, 1000);
     }
 
     function showResult(url) {
@@ -471,6 +521,28 @@
       if (currentUrl) window.open(currentUrl, '_blank', 'noopener');
     }
 
+    // サーバーがHTMLのエラーページを返した場合でも画面に理由を出せるようにする
+    async function readJson(res) {
+      const body = await res.text();
+      try {
+        return JSON.parse(body);
+      } catch (err) {
+        throw new Error(`サーバーから予期しない応答が返りました（HTTP ${res.status}）`);
+      }
+    }
+
+    function handleResult(data) {
+      if (data.url) {
+        showResult(data.url);
+        return;
+      }
+      showError(
+        `HTML生成は完了しましたが、Surgeへのデプロイに失敗しました。\n` +
+        `ローカルファイル: ${data.localFile}\n` +
+        `エラー: ${data.error || 'Surge未ログイン？'}`
+      );
+    }
+
     async function generate() {
       hideAll();
 
@@ -478,96 +550,58 @@
       const date = document.getElementById('date').value;
       const playerNotes = document.getElementById('playerNotes').value.trim();
 
-      if (currentMode === 'text') {
-        const text = document.getElementById('transcription').value.trim();
-        if (text.length < 20) {
-          showError('テキストが短すぎます。文字起こしテキストを貼り付けてください。');
-          return;
-        }
+      const isText = currentMode === 'text';
+      const text = document.getElementById('transcription').value.trim();
+      const file = document.getElementById('audioFile').files[0];
 
-        setLoading(true, 'AIがフィードバックを生成中...');
+      if (isText && text.length < 20) {
+        showError('テキストが短すぎます。文字起こしテキストを貼り付けてください。');
+        return;
+      }
+      if (!isText && !file) {
+        showError('音声ファイルを選択してください');
+        return;
+      }
 
-        try {
-          const res = await fetch('/api/generate-text', {
+      setLoading(true, isText ? 'AIがフィードバックを生成中...' : '音声をアップロード中...');
+
+      const stepTimers = isText ? [] : [
+        setTimeout(() => setLoadingMsg('音声を文字起こし中（編集なし）...'), 20000),
+        setTimeout(() => setLoadingMsg('AIがフィードバックを生成中...'), 180000),
+      ];
+
+      try {
+        let res;
+
+        if (isText) {
+          res = await fetch('/api/generate-text', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text, playerName, date, playerNotes }),
           });
-
-          const data = await res.json();
-
-          if (!res.ok) {
-            showError(data.error || '不明なエラーが発生しました');
-            return;
-          }
-
-          if (data.url) {
-            showResult(data.url);
-          } else {
-            showError(
-              `HTML生成は完了しましたが、Surgeへのデプロイに失敗しました。\n` +
-              `ローカルファイル: ${data.localFile}\n` +
-              `エラー: ${data.error || 'Surge未ログイン？'}`
-            );
-          }
-        } catch (err) {
-          showError(`通信エラー: ${err.message}`);
-        }
-
-      } else {
-        const file = document.getElementById('audioFile').files[0];
-        if (!file) {
-          showError('音声ファイルを選択してください');
-          return;
-        }
-
-        setLoading(true, '音声をGeminiにアップロード中...');
-
-        try {
+        } else {
           const formData = new FormData();
           formData.append('audio', file);
           formData.append('playerName', playerName);
           formData.append('date', date);
           formData.append('playerNotes', playerNotes);
 
-          // ステップに応じてメッセージを更新
-          const timer1 = setTimeout(() => {
-            document.getElementById('loadingMsg').textContent = '音声を文字起こし中（編集なし）...';
-          }, 5000);
-          const timer = setTimeout(() => {
-            document.getElementById('loadingMsg').textContent = 'AIがフィードバックを生成中...';
-            clearTimeout(timer1);
-          }, 30000);
-
-          const res = await fetch('/api/generate-audio', {
-            method: 'POST',
-            body: formData,
-          });
-
-          clearTimeout(timer);
-          clearTimeout(timer1);
-          const data = await res.json();
-
-          if (!res.ok) {
-            showError(data.error || '不明なエラーが発生しました');
-            return;
-          }
-
-          if (data.url) {
-            showResult(data.url);
-          } else {
-            showError(
-              `HTML生成は完了しましたが、Surgeへのデプロイに失敗しました。\n` +
-              `ローカルファイル: ${data.localFile}\n` +
-              `エラー: ${data.error || 'Surge未ログイン？'}`
-            );
-          }
-        } catch (err) {
-          showError(`通信エラー: ${err.message}`);
+          res = await fetch('/api/generate-audio', { method: 'POST', body: formData });
         }
-      }
 
-      setLoading(false);
+        const data = await readJson(res);
+
+        if (!res.ok) {
+          showError(data.error || '不明なエラーが発生しました');
+        } else {
+          handleResult(data);
+        }
+      } catch (err) {
+        showError(`通信エラー: ${err.message}`);
+      } finally {
+        stepTimers.forEach(clearTimeout);
+        setLoading(false);
+      }
     }
   </script>
 </body>
