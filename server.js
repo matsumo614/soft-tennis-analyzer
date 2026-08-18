@@ -31,8 +31,9 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
 
-// 使用中のモデルが混雑している間も生成を止めないための代替モデル
-const FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || 'gemini-flash-latest,gemini-2.5-flash')
+// 使用中のモデルが混雑している間も生成を止めないための代替モデル。
+// latestエイリアスは同時に混雑することがあるため、最後はバージョン固定のモデルを置く。
+const FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || 'gemini-flash-latest,gemini-3.6-flash')
   .split(',')
   .map(name => name.trim())
   .filter(name => name && name !== MODEL);
@@ -214,8 +215,12 @@ const SYSTEM_PROMPT = `あなたはソフトテニスのコーチングフィー
 // 待っても直らない場合は代替モデルに切り替えて生成を完了させる。
 const RETRYABLE_ERROR = /\b(429|500|502|503|504)\b|fetch failed|high demand|overloaded|rate limit/i;
 
+// 廃止されたモデルは待っても復旧しない。再試行せず次のモデルへ進み、
+// この404が本来の失敗原因（混雑など）を覆い隠さないようにする。
+const UNAVAILABLE_MODEL_ERROR = /\b404\b|not found|no longer available/i;
+
 async function generateContentWithRetry(parts, attemptsPerModel = 3) {
-  let lastError;
+  const failures = [];
 
   for (const modelName of [MODEL, ...FALLBACK_MODELS]) {
     const model = genAI.getGenerativeModel({ model: modelName });
@@ -224,22 +229,33 @@ async function generateContentWithRetry(parts, attemptsPerModel = 3) {
       try {
         return await model.generateContent(parts);
       } catch (err) {
-        lastError = err;
-        if (!RETRYABLE_ERROR.test(err.message || '')) throw err;
+        const message = err.message || String(err);
+
+        if (UNAVAILABLE_MODEL_ERROR.test(message)) {
+          console.warn(`[gemini] ${modelName} は利用できないモデルです。代替モデルに切り替えます`);
+          failures.push(`${modelName}: 利用不可`);
+          break;
+        }
+
+        if (!RETRYABLE_ERROR.test(message)) throw err;
+
+        if (attempt === attemptsPerModel) {
+          console.warn(`[gemini] ${modelName} が復旧しないため代替モデルに切り替えます`);
+          failures.push(`${modelName}: ${message.slice(0, 120)}`);
+          break;
+        }
 
         const waitMs = 5000 * attempt;
         console.warn(
           `[gemini] ${modelName} が一時エラー (${attempt}/${attemptsPerModel}): `
-          + `${(err.message || '').slice(0, 120)} — ${waitMs / 1000}秒後に再試行`
+          + `${message.slice(0, 120)} — ${waitMs / 1000}秒後に再試行`
         );
         await new Promise(resolve => setTimeout(resolve, waitMs));
       }
     }
-
-    console.warn(`[gemini] ${modelName} が復旧しないため代替モデルに切り替えます`);
   }
 
-  throw lastError;
+  throw new Error(`すべてのモデルで生成に失敗しました（${failures.join(' / ')}）`);
 }
 
 // ─── ユーティリティ ────────────────────────────────────────────────────────────
