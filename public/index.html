@@ -543,6 +543,17 @@
       );
     }
 
+    async function waitForJob(jobId) {
+      for (;;) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const res = await fetch(`/api/jobs/${jobId}`);
+        const data = await readJson(res);
+        if (!res.ok) throw new Error(data.error || '処理状況の取得に失敗しました');
+        if (data.status === 'done') return data.result;
+        if (data.status === 'error') throw new Error(data.error || '生成に失敗しました');
+      }
+    }
+
     async function generate() {
       hideAll();
 
@@ -593,11 +604,19 @@
 
         if (!res.ok) {
           showError(data.error || '不明なエラーが発生しました');
+        } else if (data.jobId) {
+          const result = await waitForJob(data.jobId);
+          handleResult(result);
         } else {
           handleResult(data);
         }
       } catch (err) {
-        showError(`通信エラー: ${err.message}`);
+        const msg = err.message || String(err);
+        showError(
+          /Failed to fetch|Load failed|NetworkError/i.test(msg)
+            ? 'サーバーとの通信が途切れました。生成に時間がかかりすぎたか、回線が切れた可能性があります。画面を閉じずに再実行してください。'
+            : `通信エラー: ${msg}`
+        );
       } finally {
         stepTimers.forEach(clearTimeout);
         setLoading(false);

@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execSync } = require('child_process');
+const crypto = require('crypto');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { GoogleAIFileManager } = require('@google/generative-ai/server');
 const { createClient } = require('@supabase/supabase-js');
@@ -256,7 +257,34 @@ const SYSTEM_PROMPT = `あなたはソフトテニスのコーチングフィー
 
 // モデルの混雑（503）やレート制限（429）は数十秒待てば復旧することが多い。
 // 待っても直らない場合は代替モデルに切り替えて生成を完了させる。
-const RETRYABLE_ERROR = /\b(429|500|502|503|504)\b|fetch failed|high demand|overloaded|rate limit/i;
+const RETRYABLE_ERROR = /\b(429|500|502|503|504)\b|fetch failed|high demand|overloaded|rate limit|応答しませんでした/i;
+
+const jobs = new Map();
+
+function createJob() {
+  const id = crypto.randomUUID();
+  jobs.set(id, { status: 'running', createdAt: Date.now() });
+  return id;
+}
+
+function completeJob(id, result) {
+  jobs.set(id, { status: 'done', result, createdAt: Date.now() });
+}
+
+function failJob(id, err) {
+  jobs.set(id, { status: 'error', error: err.message || String(err), createdAt: Date.now() });
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} が ${Math.round(ms / 1000)}秒以内に応答しませんでした`)),
+      ms
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // 廃止されたモデルは待っても復旧しない。再試行せず次のモデルへ進み、
 // この404が本来の失敗原因（混雑など）を覆い隠さないようにする。
@@ -291,13 +319,32 @@ async function generateContentWithRetry(parts, attemptsOrOpts = 3) {
   const failures = [];
 
   for (const modelName of modelNames) {
-    const model = genAI.getGenerativeModel({ model: modelName });
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+      generationConfig: { thinkingConfig: { thinkingBudget: 0 } },
+    });
 
     for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
       try {
-        return await model.generateContent(parts);
+        return await withTimeout(model.generateContent(parts), 75_000, modelName);
       } catch (err) {
         const message = err.message || String(err);
+
+        if (/thinkingConfig|thinkingBudget/i.test(message)) {
+          console.warn(`[gemini] ${modelName} は thinking 設定非対応のため、設定なしで再試行します`);
+          try {
+            return await withTimeout(
+              genAI.getGenerativeModel({ model: modelName }).generateContent(parts),
+              75_000,
+              modelName
+            );
+          } catch (retryErr) {
+            const retryMessage = retryErr.message || String(retryErr);
+            if (!RETRYABLE_ERROR.test(retryMessage) && !UNAVAILABLE_MODEL_ERROR.test(retryMessage)) throw retryErr;
+            failures.push(`${modelName}: ${retryMessage.slice(0, 120)}`);
+            break;
+          }
+        }
 
         if (UNAVAILABLE_MODEL_ERROR.test(message)) {
           console.warn(`[gemini] ${modelName} は利用できないモデルです。代替モデルに切り替えます`);
@@ -506,6 +553,47 @@ function cleanGeneratedHTML(raw) {
     .replace(/\n?```$/, '');
 }
 
+async function persistFeedback({ playerName, date, playerNotes, transcription, htmlContent, logLabel }) {
+  const slug = generateSlug(playerName, date);
+  const displayName = playerName ? `${playerName}選手` : '選手';
+  const title = `${displayName}へのフィードバック`;
+  const description = `ソフトテニス試合フィードバック（${date || ''}）`;
+  const finalHTML = buildHTML(htmlContent, title, description);
+
+  const outputDir = path.join(__dirname, 'output');
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+  const filePath = path.join(outputDir, `${slug}.html`);
+  fs.writeFileSync(filePath, finalHTML, 'utf-8');
+
+  let url = null;
+  let deployError = null;
+  try {
+    url = deployToSurge(filePath, slug);
+  } catch (err) {
+    deployError = err.message;
+  }
+
+  if (supabase) {
+    try {
+      const { error: dbError } = await supabase.from('feedbacks').insert({
+        player_name: playerName || '不明',
+        match_date: date || null,
+        match_info: null,
+        transcription_text: transcription,
+        player_notes: playerNotes || null,
+        html_content: finalHTML,
+        surge_url: url,
+      });
+      if (dbError) console.error(`[${logLabel}] DB保存エラー:`, dbError.message);
+      else console.log(`[${logLabel}] DB保存完了`);
+    } catch (dbErr) {
+      console.error(`[${logLabel}] DB保存例外:`, dbErr.message);
+    }
+  }
+
+  return { success: true, url, localFile: filePath, error: deployError };
+}
+
 // ─── テキストから生成 ─────────────────────────────────────────────────────────
 app.post('/api/generate-text', async (req, res) => {
   const { text, playerName, date, playerNotes } = req.body;
@@ -514,12 +602,16 @@ app.post('/api/generate-text', async (req, res) => {
     return res.status(400).json({ error: 'テキストが短すぎます（20文字以上必要です）' });
   }
 
-  try {
-    const playerNotesSection = playerNotes && playerNotes.trim()
-      ? `\n\n【選手の反省メモ（これらの点に必ずフィードバックすること）】\n${playerNotes.trim()}`
-      : '';
+  const jobId = createJob();
+  res.json({ jobId, status: 'running' });
 
-    const prompt = `${SYSTEM_PROMPT}
+  (async () => {
+    try {
+      const playerNotesSection = playerNotes && playerNotes.trim()
+        ? `\n\n【選手の反省メモ（これらの点に必ずフィードバックすること）】\n${playerNotes.trim()}`
+        : '';
+
+      const prompt = `${SYSTEM_PROMPT}
 
 ---
 選手名: ${playerName || '（記載なし）'}
@@ -529,53 +621,22 @@ ${playerNotesSection}
 コーチング内容（文字起こし）:
 ${text}`;
 
-    const result = await generateContentWithRetry(prompt);
-    const htmlContent = cleanGeneratedHTML(result.response.text());
-
-    const slug = generateSlug(playerName, date);
-    const displayName = playerName ? `${playerName}選手` : '選手';
-    const title = `${displayName}へのフィードバック`;
-    const description = `ソフトテニス試合フィードバック（${date || ''}）`;
-
-    const finalHTML = buildHTML(htmlContent, title, description);
-
-    const outputDir = path.join(__dirname, 'output');
-    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-    const filePath = path.join(outputDir, `${slug}.html`);
-    fs.writeFileSync(filePath, finalHTML, 'utf-8');
-
-    let url = null;
-    let deployError = null;
-
-    try {
-      url = deployToSurge(filePath, slug);
+      const result = await generateContentWithRetry(prompt);
+      const htmlContent = cleanGeneratedHTML(result.response.text());
+      const payload = await persistFeedback({
+        playerName,
+        date,
+        playerNotes,
+        transcription: text,
+        htmlContent,
+        logLabel: 'generate-text',
+      });
+      completeJob(jobId, payload);
     } catch (err) {
-      deployError = err.message;
+      console.error('[generate-text]', err);
+      failJob(jobId, new Error(`生成に失敗しました: ${err.message}`));
     }
-
-    if (supabase) {
-      try {
-        const { error: dbError } = await supabase.from('feedbacks').insert({
-          player_name: playerName || '不明',
-          match_date: date || null,
-          match_info: null,
-          transcription_text: text,
-          player_notes: playerNotes || null,
-          html_content: finalHTML,
-          surge_url: url,
-        });
-        if (dbError) console.error('[generate-text] DB保存エラー:', dbError.message);
-        else console.log('[generate-text] DB保存完了');
-      } catch (dbErr) {
-        console.error('[generate-text] DB保存例外:', dbErr.message);
-      }
-    }
-
-    res.json({ success: true, url, localFile: filePath, error: deployError });
-  } catch (err) {
-    console.error('[generate-text]', err);
-    res.status(500).json({ error: `生成に失敗しました: ${err.message}` });
-  }
+  })();
 });
 
 // ─── 音声から生成（2ステップ：忠実な文字起こし → フィードバック生成） ────────
@@ -596,28 +657,32 @@ function withMulter(handler) {
 }
 
 app.post('/api/generate-audio', withMulter(async (req, res) => {
-  req.setTimeout(20 * 60 * 1000);
-  res.setTimeout(20 * 60 * 1000);
-
   if (!req.file) {
     return res.status(400).json({ error: '音声ファイルが見つかりません' });
   }
 
   const { playerName, date, playerNotes } = req.body;
   const audioPath = req.file.path;
-  const mimeType = resolveAudioMimeType(req.file.originalname, req.file.mimetype);
+  const originalName = req.file.originalname;
+  const fileSize = req.file.size;
+  const reportedMime = req.file.mimetype;
+  const mimeType = resolveAudioMimeType(originalName, reportedMime);
 
   if (!mimeType) {
     fs.unlink(audioPath, () => {});
     return res.status(400).json({
-      error: `対応していない音声形式です（${req.file.originalname || 'ファイル名不明'}）。`
+      error: `対応していない音声形式です（${originalName || 'ファイル名不明'}）。`
         + 'm4a・mp3・wav・aac・flac のいずれかをアップロードしてください。',
     });
   }
 
+  const jobId = createJob();
+  res.json({ jobId, status: 'running' });
+
+  (async () => {
   console.log(
-    `[audio] ${req.file.originalname} / ${(req.file.size / 1024 / 1024).toFixed(1)}MB`
-    + ` / 受信mime=${req.file.mimetype} → 使用mime=${mimeType}`
+    `[audio] ${originalName} / ${(fileSize / 1024 / 1024).toFixed(1)}MB`
+    + ` / 受信mime=${reportedMime} → 使用mime=${mimeType}`
   );
 
   let uploadedFileName = null;
@@ -690,61 +755,35 @@ ${playerNotesSection}
 ${transcription}`;
 
     const result = await generateContentWithRetry(prompt);
-
     const htmlContent = cleanGeneratedHTML(result.response.text());
-
-    const slug = generateSlug(playerName, date);
-    const displayName = playerName ? `${playerName}選手` : '選手';
-    const title = `${displayName}へのフィードバック`;
-    const description = `ソフトテニス試合フィードバック（${date || ''}）`;
-
-    const finalHTML = buildHTML(htmlContent, title, description);
-
-    const outputDir = path.join(__dirname, 'output');
-    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-    const filePath = path.join(outputDir, `${slug}.html`);
-    fs.writeFileSync(filePath, finalHTML, 'utf-8');
-
-    let url = null;
-    let deployError = null;
-
-    try {
-      url = deployToSurge(filePath, slug);
-    } catch (err) {
-      deployError = err.message;
-    }
-
-    if (supabase) {
-      try {
-        const { error: dbError } = await supabase.from('feedbacks').insert({
-          player_name: playerName || '不明',
-          match_date: date || null,
-          match_info: null,
-          transcription_text: transcription,
-          player_notes: playerNotes || null,
-          html_content: finalHTML,
-          surge_url: url,
-        });
-        if (dbError) console.error('[generate-audio] DB保存エラー:', dbError.message);
-        else console.log('[generate-audio] DB保存完了');
-      } catch (dbErr) {
-        console.error('[generate-audio] DB保存例外:', dbErr.message);
-      }
-    }
-
-    res.json({ success: true, url, localFile: filePath, error: deployError });
+    const payload = await persistFeedback({
+      playerName,
+      date,
+      playerNotes,
+      transcription,
+      htmlContent,
+      logLabel: 'generate-audio',
+    });
+    completeJob(jobId, payload);
   } catch (err) {
     console.error('[generate-audio]', err);
-    res.status(500).json({ error: `処理に失敗しました: ${err.message}` });
+    failJob(jobId, new Error(`処理に失敗しました: ${err.message}`));
   } finally {
-    // Geminiにアップロードしたファイルを削除
     if (uploadedFileName) {
       fileManager.deleteFile(uploadedFileName).catch(() => {});
     }
-    // ローカルの一時ファイルを削除
     fs.unlink(audioPath, () => {});
   }
+  })();
 }));
+
+app.get('/api/jobs/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) {
+    return res.status(404).json({ error: '処理が見つかりません。ページを再読み込みしてやり直してください。' });
+  }
+  res.json(job);
+});
 
 // ─── 履歴取得 ─────────────────────────────────────────────────────────────────
 // 一覧では文字起こし本文を返さない（全件分を含めるとレスポンスが数百KBに膨らむため、
