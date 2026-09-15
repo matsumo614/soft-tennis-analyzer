@@ -532,15 +532,12 @@
     }
 
     function handleResult(data) {
-      if (data.url) {
-        showResult(data.url);
+      const payload = (data && data.result) || data || {};
+      if (payload.url) {
+        showResult(payload.url);
         return;
       }
-      showError(
-        `HTML生成は完了しましたが、Surgeへのデプロイに失敗しました。\n` +
-        `ローカルファイル: ${data.localFile}\n` +
-        `エラー: ${data.error || 'Surge未ログイン？'}`
-      );
+      showError(payload.error || '図解はできましたが、公開URLを発行できませんでした。もう一度生成してください。');
     }
 
     async function waitForJob(jobId) {
@@ -549,7 +546,7 @@
         const res = await fetch(`/api/jobs/${jobId}`);
         const data = await readJson(res);
         if (!res.ok) throw new Error(data.error || '処理状況の取得に失敗しました');
-        if (data.status === 'done') return data.result;
+        if (data.status === 'done') return data.result || data;
         if (data.status === 'error') throw new Error(data.error || '生成に失敗しました');
       }
     }

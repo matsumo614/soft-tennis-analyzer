@@ -517,6 +517,10 @@ function buildHTML(contentHTML, title, description) {
     .replace('<!-- CONTENT_END -->', '<!-- CONTENT_END -->');
 }
 
+function appBaseUrl() {
+  return (process.env.RENDER_EXTERNAL_URL || 'https://soft-tennis-analyzer.onrender.com').replace(/\/$/, '');
+}
+
 function deployToSurge(htmlFilePath, slug) {
   const domain = `diagram-${slug}.surge.sh`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'surge-'));
@@ -525,9 +529,9 @@ function deployToSurge(htmlFilePath, slug) {
     fs.copyFileSync(htmlFilePath, path.join(tempDir, 'index.html'));
     fs.writeFileSync(path.join(tempDir, 'robots.txt'), 'User-agent: *\nDisallow: /\n');
 
-    const surgeEnv = process.env.SURGE_TOKEN
-      ? { ...process.env, SURGE_TOKEN: process.env.SURGE_TOKEN }
-      : process.env;
+    const surgeEnv = { ...process.env };
+    if (process.env.SURGE_TOKEN) surgeEnv.SURGE_TOKEN = process.env.SURGE_TOKEN;
+    if (process.env.SURGE_LOGIN) surgeEnv.SURGE_LOGIN = process.env.SURGE_LOGIN;
 
     execSync(`npx --yes surge "${tempDir}" --domain "${domain}"`, {
       timeout: 90000,
@@ -565,33 +569,45 @@ async function persistFeedback({ playerName, date, playerNotes, transcription, h
   const filePath = path.join(outputDir, `${slug}.html`);
   fs.writeFileSync(filePath, finalHTML, 'utf-8');
 
-  let url = null;
+  let surgeUrl = null;
   let deployError = null;
   try {
-    url = deployToSurge(filePath, slug);
+    surgeUrl = deployToSurge(filePath, slug);
   } catch (err) {
     deployError = err.message;
+    console.warn(`[${logLabel}] Surgeデプロイ失敗: ${(deployError || '').slice(0, 200)}`);
   }
 
+  let pageId = slug;
   if (supabase) {
     try {
-      const { error: dbError } = await supabase.from('feedbacks').insert({
+      const { data: row, error: dbError } = await supabase.from('feedbacks').insert({
         player_name: playerName || '不明',
         match_date: date || null,
         match_info: null,
         transcription_text: transcription,
         player_notes: playerNotes || null,
         html_content: finalHTML,
-        surge_url: url,
-      });
+        surge_url: surgeUrl,
+      }).select('id').maybeSingle();
       if (dbError) console.error(`[${logLabel}] DB保存エラー:`, dbError.message);
-      else console.log(`[${logLabel}] DB保存完了`);
+      else {
+        console.log(`[${logLabel}] DB保存完了`);
+        if (row && row.id) pageId = row.id;
+      }
     } catch (dbErr) {
       console.error(`[${logLabel}] DB保存例外:`, dbErr.message);
     }
   }
 
-  return { success: true, url, localFile: filePath, error: deployError };
+  const hostedUrl = `${appBaseUrl()}/f/${pageId}`;
+  return {
+    success: true,
+    url: surgeUrl || hostedUrl,
+    hostedUrl,
+    localFile: filePath,
+    error: surgeUrl ? null : deployError,
+  };
 }
 
 // ─── テキストから生成 ─────────────────────────────────────────────────────────
@@ -776,6 +792,32 @@ ${transcription}`;
   }
   })();
 }));
+
+app.get('/f/:id', async (req, res) => {
+  const id = req.params.id;
+  const bySlug = path.join(__dirname, 'output', `${id}.html`);
+  if (fs.existsSync(bySlug)) {
+    return res.sendFile(bySlug);
+  }
+
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('feedbacks')
+        .select('html_content')
+        .eq('id', id)
+        .maybeSingle();
+      if (!error && data && data.html_content) {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(data.html_content);
+      }
+    } catch (err) {
+      console.error('[f/:id]', err.message);
+    }
+  }
+
+  res.status(404).send('フィードバックが見つかりません');
+});
 
 app.get('/api/jobs/:id', (req, res) => {
   const job = jobs.get(req.params.id);
