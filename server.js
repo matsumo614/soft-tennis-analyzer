@@ -29,14 +29,57 @@ if (!process.env.GEMINI_API_KEY) {
 // ─── 初期化 ──────────────────────────────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 3001;
-const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
 
-// 使用中のモデルが混雑している間も生成を止めないための代替モデル。
-// latestエイリアスは同時に混雑することがあるため、最後はバージョン固定のモデルを置く。
-const FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || 'gemini-flash-latest,gemini-3.6-flash')
-  .split(',')
-  .map(name => name.trim())
-  .filter(name => name && name !== MODEL);
+// Renderダッシュボードの古い環境変数が render.yaml より優先される。
+// lite は文字起こしが繰り返しループするため、名前に lite が付くモデルは使わない。
+function parseModelList(raw, defaults) {
+  const list = String(raw || '')
+    .split(',')
+    .map(name => name.trim())
+    .filter(Boolean);
+  return list.length ? list : defaults;
+}
+
+function isLiteModel(name) {
+  return /lite/i.test(name || '');
+}
+
+function isUnavailableModelName(name) {
+  return /^gemini-2\.5-/.test(name || '') || /^gemini-2\.0-/.test(name || '');
+}
+
+function sanitizeModels(names) {
+  const unique = [];
+  for (const name of names) {
+    if (!name || isLiteModel(name) || isUnavailableModelName(name)) continue;
+    if (!unique.includes(name)) unique.push(name);
+  }
+  return unique;
+}
+
+const HTML_MODEL_DEFAULTS = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.6-flash'];
+const TRANSCRIBE_MODEL_DEFAULTS = ['gemini-3.5-transcribe', 'gemini-flash-latest', 'gemini-3.8-flash'];
+
+const HTML_MODELS = sanitizeModels([
+  ...parseModelList(process.env.GEMINI_MODEL, []),
+  ...parseModelList(process.env.GEMINI_FALLBACK_MODELS, HTML_MODEL_DEFAULTS),
+]);
+const MODEL = HTML_MODELS[0] || 'gemini-flash-latest';
+const FALLBACK_MODELS = (HTML_MODELS.length > 1 ? HTML_MODELS.slice(1) : HTML_MODEL_DEFAULTS)
+  .filter(name => name !== MODEL);
+
+const TRANSCRIPTION_MODELS = (() => {
+  const models = sanitizeModels(
+    parseModelList(process.env.GEMINI_TRANSCRIPTION_MODELS, TRANSCRIBE_MODEL_DEFAULTS)
+  );
+  return models.length ? models : TRANSCRIBE_MODEL_DEFAULTS;
+})();
+if (process.env.GEMINI_MODEL && isLiteModel(process.env.GEMINI_MODEL)) {
+  console.warn(
+    `[gemini] GEMINI_MODEL=${process.env.GEMINI_MODEL} は文字起こしがループするため無視し、`
+    + `${MODEL} を使います`
+  );
+}
 
 // Geminiの入力上限は1,048,576トークン。安全マージンを取った値で事前に弾く
 const MAX_INPUT_TOKENS = 900000;
@@ -219,10 +262,35 @@ const RETRYABLE_ERROR = /\b(429|500|502|503|504)\b|fetch failed|high demand|over
 // この404が本来の失敗原因（混雑など）を覆い隠さないようにする。
 const UNAVAILABLE_MODEL_ERROR = /\b404\b|not found|no longer available/i;
 
-async function generateContentWithRetry(parts, attemptsPerModel = 3) {
+function looksLikeTranscriptionLoop(text) {
+  if (!text || text.length < 1500) return false;
+  const sampleSize = 160;
+  const start = Math.min(Math.floor(text.length * 0.15), text.length - sampleSize);
+  const sample = text.slice(start, start + sampleSize);
+  if (sample.trim().length < 40) return false;
+  let occurrences = 0;
+  for (let index = 0; (index = text.indexOf(sample, index)) !== -1; index += sampleSize) {
+    occurrences += 1;
+    if (occurrences >= 6) return true;
+  }
+  return false;
+}
+
+function extractGenerateContentText(payload) {
+  const parts = payload?.candidates?.[0]?.content?.parts || [];
+  return parts.map(part => part.text || '').join('').trim();
+}
+
+async function generateContentWithRetry(parts, attemptsOrOpts = 3) {
+  const attemptsPerModel = typeof attemptsOrOpts === 'number'
+    ? attemptsOrOpts
+    : (attemptsOrOpts.attemptsPerModel || 3);
+  const modelNames = (typeof attemptsOrOpts === 'object' && attemptsOrOpts.models)
+    ? attemptsOrOpts.models
+    : [MODEL, ...FALLBACK_MODELS];
   const failures = [];
 
-  for (const modelName of [MODEL, ...FALLBACK_MODELS]) {
+  for (const modelName of modelNames) {
     const model = genAI.getGenerativeModel({ model: modelName });
 
     for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
@@ -256,6 +324,102 @@ async function generateContentWithRetry(parts, attemptsPerModel = 3) {
   }
 
   throw new Error(`すべてのモデルで生成に失敗しました（${failures.join(' / ')}）`);
+}
+
+const TENNIS_VOCAB = [
+  'ソフトテニス', '前衛', '後衛', 'カットサーブ', 'スライス', 'ドライブ',
+  'ロブ', 'ボレー', 'スマッシュ', 'レシーブ', 'サービスダッシュ',
+  '軸足', '打点', '重心', 'テンポ', 'フォア', 'バックハンド', 'フォアハンド',
+];
+
+function isTranscribeModel(name) {
+  return /transcribe/i.test(name || '');
+}
+
+async function postGenerateContent(modelName, body) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const message = payload?.error?.message || `HTTP ${res.status}`;
+    throw new Error(`[${res.status}] ${message}`);
+  }
+  const text = extractGenerateContentText(payload);
+  if (!text) throw new Error('文字起こし結果が空でした');
+  return text;
+}
+
+async function transcribeWithAsrModel(modelName, audioPart) {
+  const bodies = [
+    {
+      contents: [{ parts: [audioPart] }],
+      generationConfig: {
+        audioTranscriptionConfig: {
+          languageCodes: ['ja-JP'],
+          mode: 'VERBATIM',
+          customVocabulary: TENNIS_VOCAB,
+        },
+      },
+    },
+    {
+      contents: [{ parts: [audioPart] }],
+      generationConfig: {
+        audioTranscriptionConfig: { languageCodes: ['ja-JP'] },
+      },
+    },
+    { contents: [{ parts: [audioPart] }] },
+  ];
+
+  let lastError;
+  for (const body of bodies) {
+    try {
+      return await postGenerateContent(modelName, body);
+    } catch (err) {
+      lastError = err;
+      const message = err.message || '';
+      if (RETRYABLE_ERROR.test(message) || UNAVAILABLE_MODEL_ERROR.test(message)) throw err;
+      console.warn(`[audio] ${modelName} の設定を緩めて再試行: ${message.slice(0, 120)}`);
+    }
+  }
+  throw lastError;
+}
+
+async function transcribeAudio(audioPart) {
+  const models = TRANSCRIPTION_MODELS.length ? TRANSCRIPTION_MODELS : TRANSCRIBE_MODEL_DEFAULTS;
+  const failures = [];
+
+  for (const modelName of models) {
+    try {
+      console.log(`[audio] 文字起こし開始: ${modelName}`);
+      const text = isTranscribeModel(modelName)
+        ? await transcribeWithAsrModel(modelName, audioPart)
+        : (await generateContentWithRetry(
+            [audioPart, { text: TRANSCRIPTION_PROMPT }],
+            { models: [modelName], attemptsPerModel: 3 }
+          )).response.text().trim();
+
+      if (looksLikeTranscriptionLoop(text)) {
+        console.warn(`[audio] ${modelName} の文字起こしが繰り返しのため次のモデルへ`);
+        failures.push(`${modelName}: 繰り返し出力`);
+        continue;
+      }
+      if (text.length < 20) {
+        failures.push(`${modelName}: 結果が短すぎる`);
+        continue;
+      }
+      return text;
+    } catch (err) {
+      const message = err.message || String(err);
+      console.warn(`[audio] ${modelName} 失敗: ${message.slice(0, 160)}`);
+      failures.push(`${modelName}: ${message.slice(0, 120)}`);
+    }
+  }
+
+  throw new Error(`音声の文字起こしに失敗しました（${failures.join(' / ')}）`);
 }
 
 // ─── ユーティリティ ────────────────────────────────────────────────────────────
@@ -432,6 +596,9 @@ function withMulter(handler) {
 }
 
 app.post('/api/generate-audio', withMulter(async (req, res) => {
+  req.setTimeout(20 * 60 * 1000);
+  res.setTimeout(20 * 60 * 1000);
+
   if (!req.file) {
     return res.status(400).json({ error: '音声ファイルが見つかりません' });
   }
@@ -463,36 +630,42 @@ app.post('/api/generate-audio', withMulter(async (req, res) => {
     });
     uploadedFileName = uploadResult.file.name;
 
-    // ファイルがACTIVEになるまで待つ（最大90秒）
+    // ファイルがACTIVEになるまで待つ（最大5分）
     let file = await fileManager.getFile(uploadedFileName);
     let attempts = 0;
-    while (file.state === 'PROCESSING' && attempts < 30) {
-      await new Promise(r => setTimeout(r, 3000));
+    while (file.state === 'PROCESSING' && attempts < 60) {
+      await new Promise(r => setTimeout(r, 5000));
       file = await fileManager.getFile(uploadedFileName);
       attempts++;
     }
 
+    if (file.state === 'FAILED') {
+      throw new Error('Geminiが音声ファイルの読み込みに失敗しました。別形式（m4a / mp3）で再アップロードしてください。');
+    }
     if (file.state !== 'ACTIVE') {
-      throw new Error('音声ファイルの処理がタイムアウトしました');
+      throw new Error('音声ファイルの処理がタイムアウトしました。少し待ってから再実行してください。');
     }
 
-    const countingModel = genAI.getGenerativeModel({ model: MODEL });
-    const audioPart = { fileData: { mimeType: file.mimeType, fileUri: file.uri } };
+    const audioPart = { fileData: { mimeType: mimeType || file.mimeType, fileUri: file.uri } };
 
-    const { totalTokens } = await countingModel.countTokens([audioPart, { text: TRANSCRIPTION_PROMPT }]);
-    console.log(`[audio] 入力トークン数: ${totalTokens}`);
-
-    if (totalTokens > MAX_INPUT_TOKENS) {
-      const limitMinutes = Math.floor(MAX_INPUT_TOKENS / 32 / 60);
-      throw new Error(
-        `音声が長すぎてAIが一度に処理できません（上限の約${limitMinutes}分を超えています）。`
-        + '音声を分割してアップロードしてください。'
-      );
+    try {
+      const countingModel = genAI.getGenerativeModel({ model: MODEL });
+      const { totalTokens } = await countingModel.countTokens([audioPart, { text: TRANSCRIPTION_PROMPT }]);
+      console.log(`[audio] 入力トークン数: ${totalTokens}`);
+      if (totalTokens > MAX_INPUT_TOKENS) {
+        const limitMinutes = Math.floor(MAX_INPUT_TOKENS / 32 / 60);
+        throw new Error(
+          `音声が長すぎてAIが一度に処理できません（上限の約${limitMinutes}分を超えています）。`
+          + '音声を分割してアップロードしてください。'
+        );
+      }
+    } catch (err) {
+      if (/長すぎて/.test(err.message || '')) throw err;
+      console.warn(`[audio] トークン数の事前確認をスキップ: ${(err.message || String(err)).slice(0, 160)}`);
     }
 
-    // Step 2: 忠実な文字起こし（編集なし）
-    const transcriptionResult = await generateContentWithRetry([audioPart, { text: TRANSCRIPTION_PROMPT }]);
-    let transcription = transcriptionResult.response.text().trim();
+    // Step 2: 専用ASR → 失敗時のみ汎用Flashで文字起こし
+    let transcription = await transcribeAudio(audioPart);
 
     if (transcription.length > MAX_TRANSCRIPTION_CHARS) {
       console.warn(`[audio] 文字起こしが異常に長いため切り詰めます: ${transcription.length}文字`);
@@ -661,6 +834,8 @@ app.get('/api/health', async (_, res) => {
     status: 'ok',
     model: MODEL,
     fallbackModels: FALLBACK_MODELS,
+    transcriptionModels: TRANSCRIPTION_MODELS,
+    envModel: process.env.GEMINI_MODEL || null,
     node: process.version,
     db: !!supabase,
     dbStatus,

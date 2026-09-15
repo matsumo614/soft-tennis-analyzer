@@ -9,6 +9,10 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-flash-latest
+      - key: GEMINI_FALLBACK_MODELS
+        value: gemini-3.8-flash,gemini-3.6-flash
+      - key: GEMINI_TRANSCRIPTION_MODELS
+        value: gemini-3.5-transcribe,gemini-flash-latest,gemini-3.8-flash
       - key: SURGE_TOKEN
         sync: false
       - key: NODE_ENV
