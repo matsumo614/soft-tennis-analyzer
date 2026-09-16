@@ -612,7 +612,7 @@
         showError(
           /Failed to fetch|Load failed|NetworkError/i.test(msg)
             ? 'サーバーとの通信が途切れました。生成に時間がかかりすぎたか、回線が切れた可能性があります。画面を閉じずに再実行してください。'
-            : `通信エラー: ${msg}`
+            : msg.replace(/^通信エラー:\s*/, '')
         );
       } finally {
         stepTimers.forEach(clearTimeout);

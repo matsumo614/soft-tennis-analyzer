@@ -257,7 +257,7 @@ const SYSTEM_PROMPT = `あなたはソフトテニスのコーチングフィー
 
 // モデルの混雑（503）やレート制限（429）は数十秒待てば復旧することが多い。
 // 待っても直らない場合は代替モデルに切り替えて生成を完了させる。
-const RETRYABLE_ERROR = /\b(429|500|502|503|504)\b|fetch failed|high demand|overloaded|rate limit|応答しませんでした/i;
+const RETRYABLE_ERROR = /\b(429|500|502|503|504)\b|fetch failed|Error fetching|aborted|ECONNRESET|ETIMEDOUT|overloaded|rate limit|応答しませんでした|high demand/i;
 
 const jobs = new Map();
 
@@ -309,6 +309,42 @@ function extractGenerateContentText(payload) {
   return parts.map(part => part.text || '').join('').trim();
 }
 
+function toGenerateBody(parts, generationConfig) {
+  const contentParts = typeof parts === 'string' ? [{ text: parts }] : parts;
+  const body = { contents: [{ role: 'user', parts: contentParts }] };
+  if (generationConfig) body.generationConfig = generationConfig;
+  return body;
+}
+
+async function postGenerateContent(modelName, body, timeoutMs = 180_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const message = payload?.error?.message || `HTTP ${res.status}`;
+      throw new Error(`[${res.status}] ${message}`);
+    }
+    const text = extractGenerateContentText(payload);
+    if (!text) throw new Error('生成結果が空でした');
+    return text;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`${modelName} が ${Math.round(timeoutMs / 1000)}秒以内に応答しませんでした`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function generateContentWithRetry(parts, attemptsOrOpts = 3) {
   const attemptsPerModel = typeof attemptsOrOpts === 'number'
     ? attemptsOrOpts
@@ -319,31 +355,27 @@ async function generateContentWithRetry(parts, attemptsOrOpts = 3) {
   const failures = [];
 
   for (const modelName of modelNames) {
-    const model = genAI.getGenerativeModel({
-      model: modelName,
-      generationConfig: { thinkingConfig: { thinkingBudget: 0 } },
-    });
+    let useThinkingLevel = true;
 
     for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
       try {
-        return await withTimeout(model.generateContent(parts), 75_000, modelName);
+        const generationConfig = useThinkingLevel
+          ? { thinkingConfig: { thinkingLevel: 'low' } }
+          : null;
+        const text = await postGenerateContent(
+          modelName,
+          toGenerateBody(parts, generationConfig),
+          180_000
+        );
+        return { response: { text: () => text } };
       } catch (err) {
         const message = err.message || String(err);
 
-        if (/thinkingConfig|thinkingBudget/i.test(message)) {
-          console.warn(`[gemini] ${modelName} は thinking 設定非対応のため、設定なしで再試行します`);
-          try {
-            return await withTimeout(
-              genAI.getGenerativeModel({ model: modelName }).generateContent(parts),
-              75_000,
-              modelName
-            );
-          } catch (retryErr) {
-            const retryMessage = retryErr.message || String(retryErr);
-            if (!RETRYABLE_ERROR.test(retryMessage) && !UNAVAILABLE_MODEL_ERROR.test(retryMessage)) throw retryErr;
-            failures.push(`${modelName}: ${retryMessage.slice(0, 120)}`);
-            break;
-          }
+        if (useThinkingLevel && /\b400\b|INVALID_ARGUMENT|thinking/i.test(message)) {
+          console.warn(`[gemini] ${modelName} の thinking 設定を外します: ${message.slice(0, 160)}`);
+          useThinkingLevel = false;
+          attempt -= 1;
+          continue;
         }
 
         if (UNAVAILABLE_MODEL_ERROR.test(message)) {
@@ -355,15 +387,15 @@ async function generateContentWithRetry(parts, attemptsOrOpts = 3) {
         if (!RETRYABLE_ERROR.test(message)) throw err;
 
         if (attempt === attemptsPerModel) {
-          console.warn(`[gemini] ${modelName} が復旧しないため代替モデルに切り替えます`);
-          failures.push(`${modelName}: ${message.slice(0, 120)}`);
+          console.warn(`[gemini] ${modelName} が復旧しないため代替へ: ${message.slice(0, 160)}`);
+          failures.push(`${modelName}: ${message.slice(0, 180)}`);
           break;
         }
 
         const waitMs = 5000 * attempt;
         console.warn(
           `[gemini] ${modelName} が一時エラー (${attempt}/${attemptsPerModel}): `
-          + `${message.slice(0, 120)} — ${waitMs / 1000}秒後に再試行`
+          + `${message.slice(0, 160)} — ${waitMs / 1000}秒後に再試行`
         );
         await new Promise(resolve => setTimeout(resolve, waitMs));
       }
@@ -381,23 +413,6 @@ const TENNIS_VOCAB = [
 
 function isTranscribeModel(name) {
   return /transcribe/i.test(name || '');
-}
-
-async function postGenerateContent(modelName, body) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const message = payload?.error?.message || `HTTP ${res.status}`;
-    throw new Error(`[${res.status}] ${message}`);
-  }
-  const text = extractGenerateContentText(payload);
-  if (!text) throw new Error('文字起こし結果が空でした');
-  return text;
 }
 
 async function transcribeWithAsrModel(modelName, audioPart) {
