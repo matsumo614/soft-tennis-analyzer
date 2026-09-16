@@ -58,12 +58,13 @@ function sanitizeModels(names) {
   return unique;
 }
 
-const HTML_MODEL_DEFAULTS = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.6-flash'];
-const TRANSCRIBE_MODEL_DEFAULTS = ['gemini-3.5-transcribe', 'gemini-flash-latest', 'gemini-3.8-flash'];
+const HTML_MODEL_DEFAULTS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
+const TRANSCRIBE_MODEL_DEFAULTS = ['gemini-3.5-transcribe', 'gemini-3.6-flash', 'gemini-flash-latest'];
 
 const HTML_MODELS = sanitizeModels([
+  ...HTML_MODEL_DEFAULTS,
   ...parseModelList(process.env.GEMINI_MODEL, []),
-  ...parseModelList(process.env.GEMINI_FALLBACK_MODELS, HTML_MODEL_DEFAULTS),
+  ...parseModelList(process.env.GEMINI_FALLBACK_MODELS, []),
 ]);
 const MODEL = HTML_MODELS[0] || 'gemini-flash-latest';
 const FALLBACK_MODELS = (HTML_MODELS.length > 1 ? HTML_MODELS.slice(1) : HTML_MODEL_DEFAULTS)
@@ -384,9 +385,15 @@ async function generateContentWithRetry(parts, attemptsOrOpts = 3) {
           break;
         }
 
+        if (/応答しませんでした|timeout|ETIMEDOUT/i.test(message)) {
+          console.warn(`[gemini] ${modelName} が時間切れのため代替モデルへ`);
+          failures.push(`${modelName}: タイムアウト`);
+          break;
+        }
+
         if (!RETRYABLE_ERROR.test(message)) throw err;
 
-        if (attempt === attemptsPerModel) {
+        if (attempt === attemptsPerModel || /\b503\b|high demand|overloaded/i.test(message)) {
           console.warn(`[gemini] ${modelName} が復旧しないため代替へ: ${message.slice(0, 160)}`);
           failures.push(`${modelName}: ${message.slice(0, 180)}`);
           break;
