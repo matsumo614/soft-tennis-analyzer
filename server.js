@@ -58,7 +58,7 @@ function sanitizeModels(names) {
   return unique;
 }
 
-const HTML_MODEL_DEFAULTS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
+const HTML_MODEL_DEFAULTS = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-flash-latest', 'gemini-3.7-flash', 'gemini-3.8-flash'];
 const TRANSCRIBE_MODEL_DEFAULTS = ['gemini-3.5-transcribe', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-flash-latest'];
 
 const HTML_MODELS = sanitizeModels([
@@ -378,38 +378,27 @@ async function postGenerateContent(modelName, body, timeoutMs = 180_000) {
   }
 }
 
-async function generateContentWithRetry(parts, attemptsOrOpts = 3) {
+async function generateContentWithRetry(parts, attemptsOrOpts = 5) {
   const attemptsPerModel = typeof attemptsOrOpts === 'number'
     ? attemptsOrOpts
-    : (attemptsOrOpts.attemptsPerModel || 3);
+    : (attemptsOrOpts.attemptsPerModel || 5);
   const modelNames = (typeof attemptsOrOpts === 'object' && attemptsOrOpts.models)
     ? attemptsOrOpts.models
     : [MODEL, ...FALLBACK_MODELS];
   const failures = [];
 
   for (const modelName of modelNames) {
-    let useThinkingLevel = true;
-
     for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
       try {
-        const generationConfig = useThinkingLevel
-          ? { thinkingConfig: { thinkingLevel: 'low' } }
-          : null;
         const text = await postGenerateContent(
           modelName,
-          toGenerateBody(parts, generationConfig),
+          toGenerateBody(parts, null),
           180_000
         );
+        console.log(`[gemini] ${modelName} で生成成功 (attempt ${attempt})`);
         return { response: { text: () => text } };
       } catch (err) {
         const message = err.message || String(err);
-
-        if (useThinkingLevel && /\b400\b|INVALID_ARGUMENT|thinking/i.test(message)) {
-          console.warn(`[gemini] ${modelName} の thinking 設定を外します: ${message.slice(0, 160)}`);
-          useThinkingLevel = false;
-          attempt -= 1;
-          continue;
-        }
 
         if (UNAVAILABLE_MODEL_ERROR.test(message)) {
           console.warn(`[gemini] ${modelName} は利用できないモデルです。代替モデルに切り替えます`);
@@ -417,21 +406,16 @@ async function generateContentWithRetry(parts, attemptsOrOpts = 3) {
           break;
         }
 
-        if (/応答しませんでした|timeout|ETIMEDOUT/i.test(message)) {
-          console.warn(`[gemini] ${modelName} が時間切れのため代替モデルへ`);
-          failures.push(`${modelName}: タイムアウト`);
-          break;
-        }
+        if (!RETRYABLE_ERROR.test(message) && !/応答しませんでした|timeout/i.test(message)) throw err;
 
-        if (!RETRYABLE_ERROR.test(message)) throw err;
-
-        if (attempt === attemptsPerModel || /\b503\b|high demand|overloaded/i.test(message)) {
+        if (attempt === attemptsPerModel) {
           console.warn(`[gemini] ${modelName} が復旧しないため代替へ: ${message.slice(0, 160)}`);
           failures.push(`${modelName}: ${message.slice(0, 180)}`);
           break;
         }
 
-        const waitMs = 5000 * attempt;
+        const busy = /\b503\b|high demand|overloaded|429|rate limit/i.test(message);
+        const waitMs = busy ? 12000 * attempt : 5000 * attempt;
         console.warn(
           `[gemini] ${modelName} が一時エラー (${attempt}/${attemptsPerModel}): `
           + `${message.slice(0, 160)} — ${waitMs / 1000}秒後に再試行`
@@ -991,6 +975,24 @@ app.get('/api/health', async (_, res) => {
     dbStatus,
     rawFetchStatus,
   });
+});
+
+app.get('/api/self-test', async (_, res) => {
+  const results = [];
+  for (const modelName of [MODEL, ...FALLBACK_MODELS].slice(0, 5)) {
+    try {
+      const text = await postGenerateContent(
+        modelName,
+        toGenerateBody('Reply with the single word OK.', null),
+        45_000
+      );
+      results.push({ model: modelName, ok: true, text: text.slice(0, 40) });
+      return res.json({ ok: true, used: modelName, results });
+    } catch (err) {
+      results.push({ model: modelName, ok: false, error: (err.message || String(err)).slice(0, 160) });
+    }
+  }
+  res.status(503).json({ ok: false, results });
 });
 
 // ─── グローバルエラーハンドラー ───────────────────────────────────────────────
