@@ -58,7 +58,7 @@ function sanitizeModels(names) {
   return unique;
 }
 
-const HTML_MODEL_DEFAULTS = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-flash-latest', 'gemini-3.7-flash', 'gemini-3.8-flash'];
+const HTML_MODEL_DEFAULTS = ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash'];
 const TRANSCRIBE_MODEL_DEFAULTS = ['gemini-3.5-transcribe', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-flash-latest'];
 
 const HTML_MODELS = sanitizeModels([
@@ -408,14 +408,20 @@ async function generateContentWithRetry(parts, attemptsOrOpts = 5) {
 
         if (!RETRYABLE_ERROR.test(message) && !/応答しませんでした|timeout/i.test(message)) throw err;
 
+        const busy = /\b503\b|high demand|overloaded|429|rate limit/i.test(message);
+        if (busy && attempt >= 2) {
+          console.warn(`[gemini] ${modelName} が混雑のため代替へ: ${message.slice(0, 160)}`);
+          failures.push(`${modelName}: ${message.slice(0, 180)}`);
+          break;
+        }
+
         if (attempt === attemptsPerModel) {
           console.warn(`[gemini] ${modelName} が復旧しないため代替へ: ${message.slice(0, 160)}`);
           failures.push(`${modelName}: ${message.slice(0, 180)}`);
           break;
         }
 
-        const busy = /\b503\b|high demand|overloaded|429|rate limit/i.test(message);
-        const waitMs = busy ? 12000 * attempt : 5000 * attempt;
+        const waitMs = busy ? 15000 : 5000 * attempt;
         console.warn(
           `[gemini] ${modelName} が一時エラー (${attempt}/${attemptsPerModel}): `
           + `${message.slice(0, 160)} — ${waitMs / 1000}秒後に再試行`
