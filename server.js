@@ -59,7 +59,7 @@ function sanitizeModels(names) {
 }
 
 const HTML_MODEL_DEFAULTS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
-const TRANSCRIBE_MODEL_DEFAULTS = ['gemini-3.5-transcribe', 'gemini-3.6-flash', 'gemini-flash-latest'];
+const TRANSCRIBE_MODEL_DEFAULTS = ['gemini-3.5-transcribe', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-flash-latest'];
 
 const HTML_MODELS = sanitizeModels([
   ...HTML_MODEL_DEFAULTS,
@@ -305,9 +305,34 @@ function looksLikeTranscriptionLoop(text) {
   return false;
 }
 
+function transcriptionPartToText(transcription) {
+  if (!transcription) return '';
+  if (typeof transcription === 'string') return transcription.trim();
+  if (typeof transcription.text === 'string' && transcription.text.trim()) return transcription.text.trim();
+  if (typeof transcription.transcript === 'string' && transcription.transcript.trim()) {
+    return transcription.transcript.trim();
+  }
+  const words = transcription.words || [];
+  return words
+    .map(word => (typeof word === 'string' ? word : word.word || word.text || ''))
+    .join('')
+    .trim();
+}
+
 function extractGenerateContentText(payload) {
-  const parts = payload?.candidates?.[0]?.content?.parts || [];
-  return parts.map(part => part.text || '').join('').trim();
+  const chunks = [];
+  for (const candidate of payload?.candidates || []) {
+    for (const part of candidate?.content?.parts || []) {
+      if (part.text) chunks.push(part.text);
+      const fromAudio = transcriptionPartToText(part.audioTranscription || part.audio_transcription);
+      if (fromAudio) chunks.push(fromAudio);
+    }
+    const fromCandidate = transcriptionPartToText(
+      candidate.audioTranscription || candidate.audio_transcription
+    );
+    if (fromCandidate) chunks.push(fromCandidate);
+  }
+  return chunks.join('\n').trim();
 }
 
 function toGenerateBody(parts, generationConfig) {
@@ -334,7 +359,14 @@ async function postGenerateContent(modelName, body, timeoutMs = 180_000) {
       throw new Error(`[${res.status}] ${message}`);
     }
     const text = extractGenerateContentText(payload);
-    if (!text) throw new Error('生成結果が空でした');
+    if (!text) {
+      const finish = payload?.candidates?.[0]?.finishReason || payload?.candidates?.[0]?.finish_reason || '-';
+      const block = payload?.promptFeedback?.blockReason || payload?.promptFeedback?.block_reason || '-';
+      const partKeys = (payload?.candidates?.[0]?.content?.parts || [])
+        .map(part => Object.keys(part || {}).join(','))
+        .join('|') || 'none';
+      throw new Error(`生成結果が空でした (finish=${finish} block=${block} parts=${partKeys})`);
+    }
     return text;
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -424,6 +456,22 @@ function isTranscribeModel(name) {
 
 async function transcribeWithAsrModel(modelName, audioPart) {
   const bodies = [
+    { contents: [{ parts: [audioPart] }] },
+    {
+      contents: [{ parts: [audioPart] }],
+      generationConfig: {
+        audioTranscriptionConfig: { languageCodes: ['ja-JP'] },
+      },
+    },
+    {
+      contents: [{ parts: [audioPart] }],
+      generationConfig: {
+        audioTranscriptionConfig: {
+          languageCodes: ['ja-JP'],
+          mode: 'SMART',
+        },
+      },
+    },
     {
       contents: [{ parts: [audioPart] }],
       generationConfig: {
@@ -434,24 +482,17 @@ async function transcribeWithAsrModel(modelName, audioPart) {
         },
       },
     },
-    {
-      contents: [{ parts: [audioPart] }],
-      generationConfig: {
-        audioTranscriptionConfig: { languageCodes: ['ja-JP'] },
-      },
-    },
-    { contents: [{ parts: [audioPart] }] },
   ];
 
   let lastError;
   for (const body of bodies) {
     try {
-      return await postGenerateContent(modelName, body);
+      return await postGenerateContent(modelName, body, 180_000);
     } catch (err) {
       lastError = err;
       const message = err.message || '';
-      if (RETRYABLE_ERROR.test(message) || UNAVAILABLE_MODEL_ERROR.test(message)) throw err;
-      console.warn(`[audio] ${modelName} の設定を緩めて再試行: ${message.slice(0, 120)}`);
+      if (UNAVAILABLE_MODEL_ERROR.test(message)) throw err;
+      console.warn(`[audio] ${modelName} の設定を緩めて再試行: ${message.slice(0, 160)}`);
     }
   }
   throw lastError;
@@ -466,10 +507,11 @@ async function transcribeAudio(audioPart) {
       console.log(`[audio] 文字起こし開始: ${modelName}`);
       const text = isTranscribeModel(modelName)
         ? await transcribeWithAsrModel(modelName, audioPart)
-        : (await generateContentWithRetry(
-            [audioPart, { text: TRANSCRIPTION_PROMPT }],
-            { models: [modelName], attemptsPerModel: 3 }
-          )).response.text().trim();
+        : await postGenerateContent(
+            modelName,
+            toGenerateBody([audioPart, { text: TRANSCRIPTION_PROMPT }], null),
+            180_000
+          );
 
       if (looksLikeTranscriptionLoop(text)) {
         console.warn(`[audio] ${modelName} の文字起こしが繰り返しのため次のモデルへ`);
@@ -483,8 +525,13 @@ async function transcribeAudio(audioPart) {
       return text;
     } catch (err) {
       const message = err.message || String(err);
-      console.warn(`[audio] ${modelName} 失敗: ${message.slice(0, 160)}`);
-      failures.push(`${modelName}: ${message.slice(0, 120)}`);
+      console.warn(`[audio] ${modelName} 失敗: ${message.slice(0, 200)}`);
+      failures.push(`${modelName}: ${message.slice(0, 140)}`);
+
+      if (/\b503\b|high demand|overloaded/i.test(message)) {
+        console.warn('[audio] 混雑のため20秒待って次のモデルへ');
+        await new Promise(resolve => setTimeout(resolve, 20_000));
+      }
     }
   }
 
