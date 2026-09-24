@@ -479,7 +479,7 @@
         const total = Math.floor((Date.now() - startedAt) / 1000);
         const mm = Math.floor(total / 60);
         const ss = String(total % 60).padStart(2, '0');
-        note.textContent = `経過 ${mm}分${ss}秒 ／ 混雑時は数分かかることがあります。この画面は閉じないでください`;
+        note.textContent = `経過 ${mm}分${ss}秒 ／ 混雑していても最大10分まで自動で待ちます。画面は閉じないでください`;
       };
       tick();
       elapsedTimer = setInterval(tick, 1000);
@@ -546,6 +546,7 @@
         const res = await fetch(`/api/jobs/${jobId}`);
         const data = await readJson(res);
         if (!res.ok) throw new Error(data.error || '処理状況の取得に失敗しました');
+        if (data.message) setLoadingMsg(data.message);
         if (data.status === 'done') return data.result || data;
         if (data.status === 'error') throw new Error(data.error || '生成に失敗しました');
       }

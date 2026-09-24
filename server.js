@@ -59,6 +59,14 @@ function sanitizeModels(names) {
 }
 
 const HTML_MODEL_DEFAULTS = ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash'];
+const JSON_MODELS = [
+  'gemini-3.5-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-flash-lite-latest',
+  'gemini-3.6-flash',
+  'gemini-flash-latest',
+  'gemini-3.8-flash',
+];
 const TRANSCRIBE_MODEL_DEFAULTS = ['gemini-3.5-transcribe', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-flash-latest'];
 
 const HTML_MODELS = sanitizeModels([
@@ -127,132 +135,11 @@ const TRANSCRIPTION_PROMPT = `この音声ファイルはソフトテニスの�
 - 段落分けは話題が変わるタイミングで行う
 - 文字起こしのテキストのみ出力する（説明文や「以下が文字起こしです」のような前書きは不要）`;
 
-const SYSTEM_PROMPT = `あなたはソフトテニスのコーチングフィードバックを視覚的なHTMLページに変換する専門家です。
-
-コーチング内容を分析し、HTMLページのbody部分（<!-- CONTENT_START --> と <!-- CONTENT_END --> の間に入るHTML）を生成してください。
-
-## デザイン仕様（厳守）
-- Tailwind CSSクラスのみ使用（インラインstyle禁止、<style>タグ禁止）
-- カスタムカラー: ads-accent（青）, ads-accent-light, ads-surface（薄グレー）, ads-border, ads-muted, ads-dim
-- 標準Tailwindカラー: emerald（緑）, red（赤）, amber（黄）, slate
-  例: text-emerald-600, bg-emerald-500/5, border-emerald-500/20, text-red-600, bg-red-500/5
-- Lucideアイコン: <i data-lucide="アイコン名" class="w-4 h-4"></i>
-  使用可能: check, x, check-circle, x-circle, activity, star, target, trophy, arrow-right, zap, alert-circle, info, chevron-right
-- <script>タグ禁止、アニメーション禁止、インタラクティブ要素禁止
-
-## 必須セクション（この順番で）
-
-### 1. ヒーロー
-\`\`\`
-<div class="text-center mb-8 md:mb-10">
-  <div class="inline-flex items-center gap-2 bg-ads-accent/10 text-ads-accent-light px-4 py-1.5 rounded-full text-sm font-medium mb-6">
-    <i data-lucide="activity" class="w-4 h-4"></i>
-    ソフトテニス コーチング
-  </div>
-  <h1 class="text-3xl md:text-5xl font-black text-slate-900 tracking-tight mb-4">
-    [選手名]選手への<br><span class="text-ads-accent-light">フィードバック</span>
-  </h1>
-  <p class="text-sm text-ads-dim mb-4">[日付] ／ [試合情報があれば]</p>
-  <div class="bg-ads-surface border border-ads-border rounded-2xl p-5 max-w-xl mx-auto text-left">
-    <p class="text-xs font-bold text-ads-muted mb-1">ひとことまとめ</p>
-    <p class="text-lg font-black text-slate-900">[核心を1文で]</p>
-  </div>
-</div>
-\`\`\`
-
-### 2. 良かった点
-\`\`\`
-<div class="bg-emerald-500/5 border border-emerald-500/20 rounded-2xl p-6 md:p-8 mb-6">
-  <div class="flex items-center gap-3 mb-5">
-    <div class="bg-emerald-500/10 text-emerald-600 p-2 rounded-lg">
-      <i data-lucide="star" class="w-5 h-5"></i>
-    </div>
-    <h2 class="text-xl font-black text-slate-900">良かった点</h2>
-  </div>
-  <ul class="space-y-3">
-    <li class="flex items-start gap-3">
-      <i data-lucide="check" class="w-4 h-4 text-emerald-600 mt-0.5 flex-shrink-0"></i>
-      <div>
-        <p class="font-bold text-slate-900 text-sm">[タイトル]</p>
-        <p class="text-sm text-ads-muted mt-0.5">[具体的な説明]</p>
-      </div>
-    </li>
-    [3〜5個繰り返す]
-  </ul>
-</div>
-\`\`\`
-
-### 3. 改善ポイント
-各ポイントをカード形式で（2〜4個）：
-\`\`\`
-<div class="mb-6">
-  <div class="flex items-center gap-3 mb-4">
-    <div class="bg-ads-accent/10 text-ads-accent-light p-2 rounded-lg">
-      <i data-lucide="target" class="w-5 h-5"></i>
-    </div>
-    <h2 class="text-xl font-black text-slate-900">改善ポイント</h2>
-  </div>
-  <div class="space-y-4">
-    <div class="bg-ads-surface border border-ads-border rounded-2xl p-5 md:p-6">
-      <h3 class="font-black text-slate-900 mb-4">[ポイントタイトル（技術用語を使う）]</h3>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div class="bg-red-500/5 border border-red-500/20 rounded-xl p-4">
-          <div class="flex items-center gap-1.5 text-xs font-bold text-red-600 mb-2">
-            <i data-lucide="x-circle" class="w-3.5 h-3.5"></i>今やっていること
-          </div>
-          <p class="text-sm text-slate-700">[具体的なNG内容]</p>
-        </div>
-        <div class="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4">
-          <div class="flex items-center gap-1.5 text-xs font-bold text-emerald-600 mb-2">
-            <i data-lucide="check-circle" class="w-3.5 h-3.5"></i>改善策
-          </div>
-          <p class="text-sm text-slate-700">[具体的な改善内容]</p>
-        </div>
-      </div>
-      <p class="text-xs text-ads-muted mt-3">[コーチのアドバイスや補足があれば]</p>
-    </div>
-    [繰り返す]
-  </div>
-</div>
-\`\`\`
-
-### 4. 今すぐ取り組む練習ポイント
-\`\`\`
-<div class="bg-ads-surface border border-ads-border rounded-2xl p-6 md:p-8">
-  <div class="flex items-center gap-3 mb-6">
-    <div class="bg-ads-accent/10 text-ads-accent-light p-2 rounded-lg">
-      <i data-lucide="zap" class="w-5 h-5"></i>
-    </div>
-    <h2 class="text-xl font-black text-slate-900">今すぐ取り組む練習ポイント</h2>
-  </div>
-  <div class="space-y-4">
-    <div class="flex gap-4">
-      <div class="bg-ads-accent text-white w-8 h-8 rounded-full flex items-center justify-center font-black text-sm flex-shrink-0 mt-0.5">1</div>
-      <div>
-        <p class="font-bold text-slate-900 text-sm mb-1">[練習タイトル]</p>
-        <p class="text-sm text-ads-muted">[具体的な練習内容・意識すること]</p>
-      </div>
-    </div>
-    [2, 3... 繰り返す]
-  </div>
-</div>
-\`\`\`
-
-## コンテンツ抽出のルール
-- 入力されたコーチング内容から忠実に情報を抽出する（勝手に情報を作らない）
-- 選手名・日付・対戦相手・結果があれば必ず反映する
-- コーチが使った技術用語（軸足、重心、カットサーブ、前衛、後衛、テンポ、打点など）をそのまま使う
-- 「〜がいい」「〜した方がいい」などコーチの具体的なアドバイスを忠実に反映する
-- 話し言葉のまま引用するのではなく、要点を整理して書く
-- 【選手の反省メモ】が提供されている場合は、それぞれの反省点に対してコーチの視点からのフィードバックを必ず含める
-  - 選手の反省が「コーチの解説と一致している」場合 → その正しい気づきを肯定・強化する
-  - 選手の反省が「コーチの解説に含まれていない新しい視点」の場合 → それに対しても具体的なフィードバックを追加する
-
-## 出力形式
-- HTMLのみ出力する（説明文・マークダウン記法・\`\`\`htmlは不要）
-- 最初のHTML要素から直接始める
-- <!-- CONTENT_START --> や <!-- CONTENT_END --> は含めない
-`;
+const {
+  parseFeedbackJson,
+  renderFeedbackHTML,
+  buildFeedbackPrompt,
+} = require('./feedback-page');
 
 // ─── Gemini呼び出し ───────────────────────────────────────────────────────────
 
@@ -264,16 +151,21 @@ const jobs = new Map();
 
 function createJob() {
   const id = crypto.randomUUID();
-  jobs.set(id, { status: 'running', createdAt: Date.now() });
+  jobs.set(id, { status: 'running', createdAt: Date.now(), message: '処理を開始しました' });
   return id;
 }
 
+function updateJob(id, patch) {
+  const current = jobs.get(id) || { status: 'running', createdAt: Date.now() };
+  jobs.set(id, { ...current, ...patch });
+}
+
 function completeJob(id, result) {
-  jobs.set(id, { status: 'done', result, createdAt: Date.now() });
+  updateJob(id, { status: 'done', result, error: null });
 }
 
 function failJob(id, err) {
-  jobs.set(id, { status: 'error', error: err.message || String(err), createdAt: Date.now() });
+  updateJob(id, { status: 'error', error: err.message || String(err) });
 }
 
 function withTimeout(promise, ms, label) {
@@ -378,60 +270,84 @@ async function postGenerateContent(modelName, body, timeoutMs = 180_000) {
   }
 }
 
-async function generateContentWithRetry(parts, attemptsOrOpts = 5) {
-  const attemptsPerModel = typeof attemptsOrOpts === 'number'
-    ? attemptsOrOpts
-    : (attemptsOrOpts.attemptsPerModel || 5);
-  const modelNames = (typeof attemptsOrOpts === 'object' && attemptsOrOpts.models)
-    ? attemptsOrOpts.models
-    : [MODEL, ...FALLBACK_MODELS];
-  const failures = [];
+async function generateUntilDeadline(parts, {
+  models = JSON_MODELS,
+  deadlineMs = 10 * 60 * 1000,
+  timeoutMs = 90_000,
+  generationConfig = null,
+  onProgress,
+} = {}) {
+  const started = Date.now();
+  const skipped = new Set();
+  let round = 0;
+  let lastError = new Error('生成に失敗しました');
 
-  for (const modelName of modelNames) {
-    for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
-      try {
-        const text = await postGenerateContent(
-          modelName,
-          toGenerateBody(parts, null),
-          180_000
-        );
-        console.log(`[gemini] ${modelName} で生成成功 (attempt ${attempt})`);
-        return { response: { text: () => text } };
-      } catch (err) {
-        const message = err.message || String(err);
-
-        if (UNAVAILABLE_MODEL_ERROR.test(message)) {
-          console.warn(`[gemini] ${modelName} は利用できないモデルです。代替モデルに切り替えます`);
-          failures.push(`${modelName}: 利用不可`);
-          break;
-        }
-
-        if (!RETRYABLE_ERROR.test(message) && !/応答しませんでした|timeout/i.test(message)) throw err;
-
-        const busy = /\b503\b|high demand|overloaded|429|rate limit/i.test(message);
-        if (busy && attempt >= 2) {
-          console.warn(`[gemini] ${modelName} が混雑のため代替へ: ${message.slice(0, 160)}`);
-          failures.push(`${modelName}: ${message.slice(0, 180)}`);
-          break;
-        }
-
-        if (attempt === attemptsPerModel) {
-          console.warn(`[gemini] ${modelName} が復旧しないため代替へ: ${message.slice(0, 160)}`);
-          failures.push(`${modelName}: ${message.slice(0, 180)}`);
-          break;
-        }
-
-        const waitMs = busy ? 15000 : 5000 * attempt;
-        console.warn(
-          `[gemini] ${modelName} が一時エラー (${attempt}/${attemptsPerModel}): `
-          + `${message.slice(0, 160)} — ${waitMs / 1000}秒後に再試行`
-        );
-        await new Promise(resolve => setTimeout(resolve, waitMs));
+  while (Date.now() - started < deadlineMs) {
+    const available = models.filter(name => name && !skipped.has(name));
+    if (available.length === 0) break;
+    const modelName = available[round % available.length];
+    round += 1;
+    const elapsedMin = Math.floor((Date.now() - started) / 60000);
+    const elapsedSec = String(Math.floor(((Date.now() - started) % 60000) / 1000)).padStart(2, '0');
+    if (onProgress) {
+      onProgress(`混雑時は自動で待ちます（${elapsedMin}分${elapsedSec}秒 / ${modelName}）`);
+    }
+    try {
+      const text = await postGenerateContent(
+        modelName,
+        toGenerateBody(parts, generationConfig),
+        timeoutMs
+      );
+      console.log(`[gemini] ${modelName} で生成成功 round=${round}`);
+      return text;
+    } catch (err) {
+      const message = err.message || String(err);
+      lastError = err;
+      console.warn(`[gemini] ${modelName} 失敗: ${message.slice(0, 180)}`);
+      if (UNAVAILABLE_MODEL_ERROR.test(message)) {
+        skipped.add(modelName);
+        continue;
       }
+      if (!RETRYABLE_ERROR.test(message) && !/応答しませんでした|timeout|JSON/i.test(message)) {
+        throw err;
+      }
+      const waitMs = Math.min(45_000, 8000 + 7000 * Math.floor((round - 1) / Math.max(available.length, 1)));
+      await new Promise(resolve => setTimeout(resolve, waitMs));
     }
   }
 
-  throw new Error(`すべてのモデルで生成に失敗しました（${failures.join(' / ')}）`);
+  throw new Error(`混雑が解消せず生成できませんでした（${(lastError.message || String(lastError)).slice(0, 180)}）`);
+}
+
+async function generateFeedbackHtml({ playerName, date, playerNotes, transcription, onProgress }) {
+  const prompt = buildFeedbackPrompt({ playerName, date, playerNotes, transcription });
+  let raw;
+  try {
+    raw = await generateUntilDeadline(prompt, {
+      models: JSON_MODELS,
+      deadlineMs: 10 * 60 * 1000,
+      generationConfig: { responseMimeType: 'application/json' },
+      onProgress,
+    });
+  } catch (err) {
+    console.warn('[feedback] JSON指定での生成に失敗したため、指定なしで再試行:', (err.message || '').slice(0, 160));
+    raw = await generateUntilDeadline(prompt, {
+      models: JSON_MODELS,
+      deadlineMs: 8 * 60 * 1000,
+      generationConfig: null,
+      onProgress,
+    });
+  }
+  const data = parseFeedbackJson(raw);
+  return renderFeedbackHTML({
+    playerName,
+    date,
+    matchInfo: data.matchInfo,
+    summary: data.summary,
+    goods: data.goods,
+    improvements: data.improvements,
+    drills: data.drills,
+  });
 }
 
 const TENNIS_VOCAB = [
@@ -488,13 +404,20 @@ async function transcribeWithAsrModel(modelName, audioPart) {
   throw lastError;
 }
 
-async function transcribeAudio(audioPart) {
+async function transcribeAudio(audioPart, onProgress) {
   const models = TRANSCRIPTION_MODELS.length ? TRANSCRIPTION_MODELS : TRANSCRIBE_MODEL_DEFAULTS;
-  const failures = [];
+  const started = Date.now();
+  const deadlineMs = 8 * 60 * 1000;
+  let round = 0;
+  let lastError = new Error('音声の文字起こしに失敗しました');
 
-  for (const modelName of models) {
+  while (Date.now() - started < deadlineMs) {
+    const modelName = models[round % models.length];
+    round += 1;
+    if (onProgress) {
+      onProgress(`音声を文字起こし中です（${modelName}・${round}回目）`);
+    }
     try {
-      console.log(`[audio] 文字起こし開始: ${modelName}`);
       const text = isTranscribeModel(modelName)
         ? await transcribeWithAsrModel(modelName, audioPart)
         : await postGenerateContent(
@@ -502,30 +425,23 @@ async function transcribeAudio(audioPart) {
             toGenerateBody([audioPart, { text: TRANSCRIPTION_PROMPT }], null),
             180_000
           );
-
       if (looksLikeTranscriptionLoop(text)) {
-        console.warn(`[audio] ${modelName} の文字起こしが繰り返しのため次のモデルへ`);
-        failures.push(`${modelName}: 繰り返し出力`);
+        lastError = new Error(`${modelName}: 繰り返し出力`);
         continue;
       }
       if (text.length < 20) {
-        failures.push(`${modelName}: 結果が短すぎる`);
+        lastError = new Error(`${modelName}: 結果が短すぎる`);
         continue;
       }
       return text;
     } catch (err) {
-      const message = err.message || String(err);
-      console.warn(`[audio] ${modelName} 失敗: ${message.slice(0, 200)}`);
-      failures.push(`${modelName}: ${message.slice(0, 140)}`);
-
-      if (/\b503\b|high demand|overloaded/i.test(message)) {
-        console.warn('[audio] 混雑のため20秒待って次のモデルへ');
-        await new Promise(resolve => setTimeout(resolve, 20_000));
-      }
+      lastError = err;
+      console.warn(`[audio] ${modelName} 失敗: ${(err.message || String(err)).slice(0, 200)}`);
+      await new Promise(resolve => setTimeout(resolve, Math.min(40000, 8000 * Math.min(round, 4))));
     }
   }
 
-  throw new Error(`音声の文字起こしに失敗しました（${failures.join(' / ')}）`);
+  throw new Error(`音声の文字起こしに失敗しました（${(lastError.message || String(lastError)).slice(0, 180)}）`);
 }
 
 // ─── ユーティリティ ────────────────────────────────────────────────────────────
@@ -682,22 +598,13 @@ app.post('/api/generate-text', async (req, res) => {
 
   (async () => {
     try {
-      const playerNotesSection = playerNotes && playerNotes.trim()
-        ? `\n\n【選手の反省メモ（これらの点に必ずフィードバックすること）】\n${playerNotes.trim()}`
-        : '';
-
-      const prompt = `${SYSTEM_PROMPT}
-
----
-選手名: ${playerName || '（記載なし）'}
-日付: ${date || '（記載なし）'}
-${playerNotesSection}
-
-コーチング内容（文字起こし）:
-${text}`;
-
-      const result = await generateContentWithRetry(prompt);
-      const htmlContent = cleanGeneratedHTML(result.response.text());
+      const htmlContent = await generateFeedbackHtml({
+        playerName,
+        date,
+        playerNotes,
+        transcription: text,
+        onProgress: message => updateJob(jobId, { message }),
+      });
       const payload = await persistFeedback({
         playerName,
         date,
@@ -805,7 +712,7 @@ app.post('/api/generate-audio', withMulter(async (req, res) => {
     }
 
     // Step 2: 専用ASR → 失敗時のみ汎用Flashで文字起こし
-    let transcription = await transcribeAudio(audioPart);
+    let transcription = await transcribeAudio(audioPart, message => updateJob(jobId, { message }));
 
     if (transcription.length > MAX_TRANSCRIPTION_CHARS) {
       console.warn(`[audio] 文字起こしが異常に長いため切り詰めます: ${transcription.length}文字`);
@@ -813,24 +720,15 @@ app.post('/api/generate-audio', withMulter(async (req, res) => {
     }
 
     console.log(`[audio] 文字起こし完了: ${transcription.length}文字`);
+    updateJob(jobId, { message: '文字起こし完了。図解を生成しています...' });
 
-    // Step 3: 文字起こしテキストからフィードバックHTML生成
-    const playerNotesSection = playerNotes && playerNotes.trim()
-      ? `\n\n【選手の反省メモ（これらの点に必ずフィードバックすること）】\n${playerNotes.trim()}`
-      : '';
-
-    const prompt = `${SYSTEM_PROMPT}
-
----
-選手名: ${playerName || '（記載なし）'}
-日付: ${date || '（記載なし）'}
-${playerNotesSection}
-
-コーチング内容（文字起こし）:
-${transcription}`;
-
-    const result = await generateContentWithRetry(prompt);
-    const htmlContent = cleanGeneratedHTML(result.response.text());
+    const htmlContent = await generateFeedbackHtml({
+      playerName,
+      date,
+      playerNotes,
+      transcription,
+      onProgress: message => updateJob(jobId, { message }),
+    });
     const payload = await persistFeedback({
       playerName,
       date,
